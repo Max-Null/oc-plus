@@ -20,6 +20,38 @@
 | 一 | 双星系统 V1.1 | ✅ 已实施 | `.opencode/agents/` 4 个 agent，`/double-star` 命令 |
 | 一 | 记忆管家 V1.0 | ✅ 已实施 | 赛博分身 agent + 三层记忆 + 自主习惯发现 + 触发执行 |
 
+## 双星系统架构
+
+```
+用户输入
+    │
+    ▼
+┌──────────────────────────────────────┐
+│     协调层 (Orchestrator / Primary)    │
+│  ┌──────────┐  并行调用  ┌──────────┐ │
+│  │ 左脑     │ ←────────→ │ 右脑     │ │
+│  │ 微观路径  │            │ 宏观目标  │ │
+│  │ temp=0.2 │            │ temp=0.7 │ │
+│  │ 只读     │            │ 只读     │ │
+│  └────┬─────┘            └────┬─────┘ │
+│       │ JSON 摘要              │       │
+│       └──────────┬─────────────┘       │
+│                  ▼                     │
+│         仲裁整合（偏差≥20%→右脑优先）    │
+│                  │                     │
+│            最终指令 + 日志              │
+└──────────────────┬───────────────────┘
+                   │
+                   ▼
+┌──────────────────────────────────────┐
+│    Build Executor (Subagent)          │
+│    执行层 / 全权限 / temp=0.1          │
+│    接收指令 → 执行代码 → 返回结果       │
+└──────────────────────────────────────┘
+```
+
+~/.config/opencode/agents/ 下 4 个 agent 定义，通过 `/double-star` 命令启动协作流程。
+
 ## 记忆管家架构
 
 ```
@@ -82,12 +114,52 @@ oc-plus/
     └── double-star.md
 ```
 
-## 使用方式
+## 部署（在新电脑上）
 
-在 oc-plus 目录下启动 opencode：
+将 oc-plus 目录复制到目标电脑，打开 PowerShell，执行以下步骤：
+
+### 1. 部署 agent 定义
+
 ```powershell
-cd H:\MaxNull\WorkStation\oc-plus
-opencode
+$OC = "$env:USERPROFILE\.config\opencode"
+New-Item -ItemType Directory -Path "$OC\agents" -Force | Out-Null
+New-Item -ItemType Directory -Path "$OC\commands" -Force | Out-Null
+
+# 逐个复制，不会误伤已有 agent
+Copy-Item ".\双星系统\agents\left-brain.md" "$OC\agents\" -Force
+Copy-Item ".\双星系统\agents\right-brain.md" "$OC\agents\" -Force
+Copy-Item ".\双星系统\agents\orchestrator.md" "$OC\agents\" -Force
+Copy-Item ".\双星系统\agents\build-executor.md" "$OC\agents\" -Force
+Copy-Item ".\记忆管家\agents\cyber-alterego.md" "$OC\agents\" -Force
 ```
 
-然后说"继续上次的工作"——opencode 读到 README.md 就知道进度，接着继续。
+### 2. 部署命令
+
+```powershell
+Copy-Item ".\双星系统\commands\*.md" "$OC\commands\" -Force
+```
+
+### 3. 部署记忆管家 Plugin
+
+```powershell
+New-Item -ItemType Directory -Path "$OC\plugins" -Force | Out-Null
+Copy-Item ".\记忆管家\memories.ts" "$OC\plugins\memories.ts" -Force
+
+# 创建记忆存储目录
+New-Item -ItemType Directory -Path "$OC\memories\blocks" -Force | Out-Null
+New-Item -ItemType Directory -Path "$OC\memories\triggers" -Force | Out-Null
+```
+
+### 4. 注册 Plugin
+
+编辑 `~/.config/opencode/opencode.json`，确保 `plugin` 数组中包含 `"memories"`：
+
+```json
+{
+  "plugin": ["...其他插件...", "memories"]
+}
+```
+
+### 5. 重启 opencode
+
+重新启动 opencode 后，在任意项目中输入 `/double-star` 测试双星系统，正常使用一段时间后检查 `~/.config/opencode/memories/events.log` 验证记忆管家是否在记录事件。
