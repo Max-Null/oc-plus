@@ -1,0 +1,20 @@
+{
+  "name": "oc-plus",
+  "version": "0.1.0",
+  "description": "OpenCode 80-point enhancement - Memories Plugin + Agent system",
+  "type": "module",
+  "scripts": {
+    "test": "echo \"wip\""
+  },
+  "keywords": [
+    "opencode",
+    "plugin",
+    "memory",
+    "agent"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@opencode-ai/plugin": "^1.17.18",
+    "@opencode-ai/sdk": "^1.17.18"
+  }
+}

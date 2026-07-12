@@ -1,0 +1,16 @@
+# 依赖
+node_modules/
+
+# OpenCode 运行时
+.opencode/logs/
+
+# 系统
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
