@@ -27,7 +27,7 @@
     │
     ▼
 ┌──────────────────────────────────────┐
-│     协调层 (Orchestrator / Primary)    │
+│     协调层 (双星 / Primary)    │
 │  ┌──────────┐  并行调用  ┌──────────┐ │
 │  │ 左脑     │ ←────────→ │ 右脑     │ │
 │  │ 微观路径  │            │ 宏观目标  │ │
@@ -84,17 +84,17 @@ oc-plus/
 ├── 双星系统/
 │   ├── 设计.md              ← 双星系统设计文档
 │   ├── agents/              ← 双星源码（4 agent 定义）
-│   │   ├── left-brain.md
-│   │   ├── right-brain.md
-│   │   ├── orchestrator.md
-│   │   └── build-executor.md
+│   │   ├── 左脑.md
+│   │   ├── 右脑.md
+│   │   ├── 双星.md
+│   │   └── 构建执行器.md
 │   └── commands/
 │       └── double-star.md
 ├── 记忆管家/
 │   ├── 设计.md              ← 记忆管家设计文档
 │   ├── memories.ts          ← 记忆管家 Plugin 源码（668行）
 │   └── agents/
-│       └── cyber-alterego.md ← 赛博分身 agent 定义
+│       └── 助理.md ← 赛博分身 agent 定义
 └── doc/                    ← 计划 / 原型 / 知识
 ```
 
@@ -105,11 +105,11 @@ oc-plus/
 ```
 ~/.config/opencode/
 ├── agents/
-│   ├── left-brain.md        ← 从 oc-plus/双星系统/agents/ 复制
-│   ├── right-brain.md
-│   ├── orchestrator.md
-│   ├── build-executor.md
-│   └── cyber-alterego.md    ← 从 oc-plus/记忆管家/agents/ 复制
+│   ├── 左脑.md        ← 从 oc-plus/双星系统/agents/ 复制
+│   ├── 右脑.md
+│   ├── 双星.md
+│   ├── 构建执行器.md
+│   └── 助理.md    ← 从 oc-plus/记忆管家/agents/ 复制
 └── commands/
     └── double-star.md
 ```
@@ -126,11 +126,11 @@ New-Item -ItemType Directory -Path "$OC\agents" -Force | Out-Null
 New-Item -ItemType Directory -Path "$OC\commands" -Force | Out-Null
 
 # 逐个复制，不会误伤已有 agent
-Copy-Item ".\双星系统\agents\left-brain.md" "$OC\agents\" -Force
-Copy-Item ".\双星系统\agents\right-brain.md" "$OC\agents\" -Force
-Copy-Item ".\双星系统\agents\orchestrator.md" "$OC\agents\" -Force
-Copy-Item ".\双星系统\agents\build-executor.md" "$OC\agents\" -Force
-Copy-Item ".\记忆管家\agents\cyber-alterego.md" "$OC\agents\" -Force
+Copy-Item ".\双星系统\agents\左脑.md" "$OC\agents\" -Force
+Copy-Item ".\双星系统\agents\右脑.md" "$OC\agents\" -Force
+Copy-Item ".\双星系统\agents\双星.md" "$OC\agents\" -Force
+Copy-Item ".\双星系统\agents\构建执行器.md" "$OC\agents\" -Force
+Copy-Item ".\记忆管家\agents\助理.md" "$OC\agents\" -Force
 ```
 
 ### 2. 部署命令

@@ -236,7 +236,7 @@ function getApiConfig(): { apiKey: string; baseURL: string; model: string } | nu
   try {
     const raw = fs.readFileSync(configPath, "utf-8");
     const config = JSON.parse(raw);
-    const model = config.model || "deepseek-chat";
+    const model = config.model || "my-deepseek:deepseek-v4-flash";
     const providers = config.provider || {};
     for (const [, provider] of Object.entries(providers)) {
       const p = provider as Record<string, unknown>;
@@ -595,7 +595,7 @@ export const MemoriesPlugin = async (ctx?: { project?: { directory?: string } })
       // 注入例行规则：每次文件操作后请示赛博分身
       if (triggers.length > 0) {
         output.system.push(
-          `\n## 例行规则\n每次完成文件写入操作后，通过 task tool 调用赛博分身 subagent（cyber-alterego），附上你刚才做了什么（操作类型、文件路径、简要说明）。这只需很短的时间，就像用户每次做完事后看一眼助理。\n`
+          `\n## 例行规则\n每次完成文件写入操作后，通过 task tool 调用赛博分身 subagent（助理），附上你刚才做了什么（操作类型、文件路径、简要说明）。这只需很短的时间，就像用户每次做完事后看一眼助理。\n`
         );
       }
     },

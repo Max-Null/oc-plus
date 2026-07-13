@@ -1,6 +1,6 @@
 ---
 description: 启动双星系统协作 V1.1
-agent: orchestrator
+agent: 双星
 ---
 
 # 双星系统 V1.1
@@ -10,9 +10,9 @@ agent: orchestrator
 
 ## 流程
 1. 协调层接收任务
-2. 使用两个独立 Task tool 同时并行调用 left-brain 和 right-brain
+2. 使用两个独立 Task tool 同时并行调用 左脑 和 右脑
 3. 协调层按仲裁规则整合输出
-4. 使用 Task tool 将最终指令传递给 build-executor 执行
+4. 使用 Task tool 将最终指令传递给 构建执行器 执行
 5. 返回执行结果
 
 ## 预期耗时（非强制限制）
