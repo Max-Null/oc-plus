@@ -14,3 +14,6 @@ desktop.ini
 .idea/
 *.swp
 *.swo
+
+# OpenCode 临时分析
+.tmp-omo-analysis/

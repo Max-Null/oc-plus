@@ -1,5 +1,5 @@
 /**
- * 记忆管家 Plugin for OpenCode
+ * 记忆管家 Plugin for OpenCode — v1.2
  *
  * 三层记忆架构：
  * - 全局：~/.config/opencode/memories/
@@ -16,6 +16,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
+import { getSystemPrompt, getUserPrompt } from "./prompts.js";
 
 // ============================================================
 // 路径常量
@@ -32,6 +33,27 @@ const LAST_ANALYSIS = path.join(MEMORIES_DIR, "last-analysis.json");
 
 const ANALYSIS_THRESHOLD = 20; // 累积 N 条事件后触发分析
 const MAX_EVENTS_FOR_ANALYSIS = 200;
+const MAX_LOG_SIZE = 1 * 1024 * 1024; // 日志轮转阈值：1MB
+
+// ============================================================
+// 日志轮转：超过阈值时保留最近一段，其余丢弃
+// ============================================================
+
+function rotateLog(logPath: string, maxSize: number = MAX_LOG_SIZE) {
+  try {
+    if (!fs.existsSync(logPath)) return;
+    const stat = fs.statSync(logPath);
+    if (stat.size <= maxSize) return;
+    // 保留最近 100KB 的事件
+    const content = fs.readFileSync(logPath, "utf-8");
+    const keepSize = Math.min(maxSize, stat.size);
+    const tail = content.slice(-keepSize);
+    // 从第一个完整行开始保留
+    const firstNewline = tail.indexOf("\n");
+    fs.writeFileSync(logPath, firstNewline > 0 ? tail.slice(firstNewline + 1) : tail, "utf-8");
+    debug(`LOG: 轮转 ${logPath}，${stat.size} → ${fs.statSync(logPath).size} bytes`);
+  } catch { /* 静默 */ }
+}
 
 // ============================================================
 // 工具函数
@@ -90,28 +112,32 @@ function getMemoryPaths(projectDir?: string): string[] {
  * 高优先级同名文件覆盖低优先级
  */
 function mergeBlocksAndTriggers(memoryPaths: string[]): {
-  blocks: Array<{ label: string; description: string; confidence: string; status: string; value: string }>;
-  triggers: Array<{ label: string; human_description: string; confidence: string; status: string; content: string }>;
+  blocks: Array<{ type: string; label: string; description: string; confidence: string; status: string; suggested_status: string; memPathIndex: string; value: string }>;
+  triggers: Array<{ type: string; label: string; human_description: string; confidence: string; status: string; suggested_status: string; memPathIndex: string; content: string }>;
 } {
-  const blockMap = new Map<string, { label: string; description: string; confidence: string; status: string; value: string }>();
-  const triggerMap = new Map<string, { label: string; human_description: string; confidence: string; status: string; content: string }>();
+  const blockMap = new Map<string, { type: string; label: string; description: string; confidence: string; status: string; suggested_status: string; memPathIndex: string; value: string }>();
+  const triggerMap = new Map<string, { type: string; label: string; human_description: string; confidence: string; status: string; suggested_status: string; memPathIndex: string; content: string }>();
 
   // 从低优先级到高优先级遍历
-  for (const memPath of memoryPaths) {
+  for (let pathIndex = 0; pathIndex < memoryPaths.length; pathIndex++) {
+    const memPath = memoryPaths[pathIndex];
     // 读取 blocks/
     const blocksDir = path.join(memPath, "blocks");
     if (fs.existsSync(blocksDir)) {
       const files = fs.readdirSync(blocksDir).filter(f => f.endsWith(".md"));
       for (const file of files) {
         const content = safeReadFile(path.join(blocksDir, file));
-        const meta = parseMeta(content, 100);
+        const meta = parseMeta(content, 150);
         if (meta) {
           const label = meta.label || file.replace(".md", "");
           blockMap.set(label, {
+            type: meta.type || "habit",
             label,
             description: meta.description || "",
             confidence: meta.confidence || "",
-            status: meta.status || "observing",
+            status: meta.status || "pending",
+            suggested_status: meta.suggested_status || "suggest",
+            memPathIndex: String(pathIndex),
             value: extractBlockValue(content),
           });
         }
@@ -124,14 +150,17 @@ function mergeBlocksAndTriggers(memoryPaths: string[]): {
       const files = fs.readdirSync(triggersDir).filter(f => f.endsWith(".md"));
       for (const file of files) {
         const content = safeReadFile(path.join(triggersDir, file));
-        const meta = parseMeta(content, 300);
+        const meta = parseMeta(content, 400);
         if (meta) {
           const label = meta.label || file.replace(".md", "");
           triggerMap.set(label, {
+            type: meta.type || "habit",
             label,
             human_description: meta.human_description || "",
             confidence: meta.confidence || "",
-            status: meta.status || "observing",
+            status: meta.status || "pending",
+            suggested_status: meta.suggested_status || "suggest",
+            memPathIndex: String(pathIndex),
             content: extractTriggerContent(content),
           });
         }
@@ -193,6 +222,7 @@ function logEvent(event: unknown) {
   try {
     const line = JSON.stringify({ ts: new Date().toISOString(), event }) + "\n";
     fs.appendFileSync(EVENT_LOG, line, "utf-8");
+    rotateLog(EVENT_LOG); // 超过 1MB 自动轮转
   } catch {
     // 静默失败
   }
@@ -224,7 +254,8 @@ function getNewEvents(): string[] {
   const newLines = last.ts
     ? lines.filter(line => {
         try {
-          return JSON.parse(line).ts > last.ts;
+          const lastTs = last.ts as string; // 三元表达式已过滤 null，闭包内需显式断言
+          return JSON.parse(line).ts > lastTs;
         } catch { return false; }
       })
     : lines;
@@ -309,105 +340,9 @@ async function analyzeAndUpdate(eventLines: string[], memoryPaths: string[]): Pr
     }
   }
 
-  const systemPrompt = `你是用户的赛博分身——记忆管家（分析模式）。
+  const systemPrompt = getSystemPrompt();
 
-你的任务：分析用户的操作记录，自主发现用户的重复行为模式（habits）。
-
-## 记忆框架
-
-记忆文件分两类，存放在 memPath 下的两个子目录中：
-
-### blocks/ — 习惯描述（供主 agent 参考）
-格式：
-\`\`\`markdown
-<!-- label: 标签名 -->
-<!-- description: 简短描述（给 LLM 看） -->
-<!-- confidence: 确认次数/总观察次数 -->
-<!-- status: observing | suggest | auto-execute -->
-
-习惯的具体描述...
-\`\`\`
-
-### triggers/ — 触发规则（供 system prompt 注入，主 agent 执行）
-格式：
-\`\`\`markdown
-<!-- label: 标签名 -->
-<!-- human_description: 给人看的说明 -->
-<!-- confidence: x/y -->
-<!-- status: suggest | auto-execute -->
-
-trigger:
-  on: file_created
-  match:
-    - "glob模式1"
-    - "glob模式2"
-  exclude:
-    - "glob排除模式"
-
-action:
-  type: review
-  focus:
-    - 审查重点1
-    - 审查重点2
-
-message_template:
-  "你刚生成了 {filename}，按我的习惯，你先审查一遍吧。重点看：{focus}"
-\`\`\`
-
-## 置信度阈值
-
-- 2-3 次：status=observing，只写 block，不写 trigger
-- 4-6 次：status=suggest，写 trigger
-- 7+ 次：status=auto-execute，更新 trigger status
-
-## 自主发现规则
-
-1. 扫描事件序列，发现反复出现的模式。不限于以下方向：
-   - 用户 A 操作后经常 B 操作（如"生成文档后手动审查"）
-   - 用户反复纠正同一类错误（如"反复指出命名不规范"）
-   - 用户对某些工具/命令有偏好
-2. 发现新模式 → 创建 block 文件
-3. 已有模式再次确认 → 更新 confidence 计数
-4. 跨过阈值 → 创建/更新 trigger 文件
-5. 没有新发现 → 返回 "NO_NEW_HABITS"
-6. 不确定是不是习惯 → 宁可不记，不瞎猜
-
-## 输出格式
-
-严格返回 JSON，格式如下（不输出 markdown 或解释）：
-
-{
-  "actions": [
-    {
-      "type": "create_block | update_block | create_trigger | update_trigger | skip",
-      "file": "文件名（如 review-habits.md）",
-      "memPath": "0=全局 1=个人项目级 2=共享项目级",
-      "content": "文件完整内容（UTF-8，含元数据注释）",
-      "reason": "为什么做这个操作（一句话）"
-    }
-  ],
-  "summary": "本次分析摘要（一句话，如 发现1个新模式，确认2个已有习惯）"
-}`;
-
-  const userPrompt = `## 已有记忆
-
-### blocks
-${existingBlocks.length > 0 ? existingBlocks.join("\n\n---\n\n") : "（空，暂无任何已记录的习惯）"}
-
-### triggers
-${existingTriggers.length > 0 ? existingTriggers.join("\n\n---\n\n") : "（空，暂无任何触发规则）"}
-
-## 新增事件（${eventSummary.length} 条）
-
-${JSON.stringify(eventSummary, null, 2)}
-
-## 记忆路径
-
-- path[0]（全局）: ${memoryPaths[0]}
-- path[1]（个人项目级）: ${memoryPaths[1] || "（未传入项目目录）"}
-- path[2]（共享项目级）: ${memoryPaths[2] || "（未传入或不存在）"}
-
-请分析并返回 JSON。`;
+  const userPrompt = getUserPrompt(existingBlocks, existingTriggers, eventSummary.length, JSON.stringify(eventSummary, null, 2), memoryPaths);
 
   try {
     debug(`MEMORY: 调用 LLM 分析 ${eventSummary.length} 条事件...`);
@@ -517,6 +452,8 @@ export const MemoriesPlugin = async (ctx?: { project?: { directory?: string } })
   ensureDir(MEMORIES_DIR);
   ensureDir(BLOCKS_DIR);
   ensureDir(TRIGGERS_DIR);
+  rotateLog(DEBUG_LOG, 500 * 1024); // debug 日志上限 500KB
+  rotateLog(EVENT_LOG); // 启动时检查一次事件日志
 
   const projectDir = ctx?.project?.directory || undefined;
 
@@ -531,6 +468,19 @@ export const MemoriesPlugin = async (ctx?: { project?: { directory?: string } })
       output: { system: string[] }
     ) => {
       debug("HOOK: system.transform fired");
+
+      // ---- 步骤 0：注入记忆管家核心规则（每次会话无条件注入） ----
+      output.system.push(`\n## 记忆管家 v1.1
+
+**回应模式**：每次完成文件写入操作（write / edit）后，必须通过 task 工具调用 \`助理\` subagent，附上操作类型、文件路径、简要说明。调用助理后，把助理返回的指令当作用户消息处理——按助理说的做。助理返回"无事，继续"时不追问。调用失败时静默跳过。
+
+**元知识记录**：当用户说"记住"、"记下来"、"存到记忆"时，判断信息层级后写入对应的 blocks/ 目录：
+- 全局 → \`~/.config/opencode/memories/blocks/\`
+- 个人项目级 → \`~/.config/opencode/project/<hash>/memories/blocks/\`
+- 共享项目级 → 项目 \`.opencode/memories/blocks/\`
+文件格式：<!-- type: knowledge --><!-- status: auto --> 开头。写入后告知用户。
+
+**习惯确认**：本章节若出现"发现新习惯，待确认"标题，你必须先用 question 工具逐条确认（含层级），确认完成后才能继续用户任务。\n`);
 
       const memoryPaths = getMemoryPaths(projectDir);
 
@@ -555,49 +505,73 @@ export const MemoriesPlugin = async (ctx?: { project?: { directory?: string } })
       // ---- 步骤 2：注入 blocks + triggers ----
       const { blocks, triggers } = mergeBlocksAndTriggers(memoryPaths);
 
-      // 注入 blocks（习惯参考）
-      if (blocks.length > 0) {
-        const blockText = blocks
-          .map(b => `### ${b.label}\n${b.description}\n${b.value}`)
+      // 按 type + status 分类
+      const autoHabits = triggers.filter(t => t.type === "habit" && t.status === "auto");
+      const suggestHabits = triggers.filter(t => t.type === "habit" && t.status === "suggest");
+      const pendingBlocks = blocks.filter(b => b.status === "pending");
+      const pendingTriggers = triggers.filter(t => t.status === "pending");
+      const pendingCount = pendingBlocks.length + pendingTriggers.length;
+      const knowledgeItems = (blocks.filter(b => b.type === "knowledge" && b.status !== "pending") as any[])
+        .concat(triggers.filter(t => t.type === "knowledge" && t.status !== "pending") as any[]);
+
+      // 注入 knowledge（元认知/项目知识）
+      if (knowledgeItems.length > 0) {
+        const knowledgeText = knowledgeItems
+          .map(k => {
+            const meta = (k as any).human_description ? (k as any) : k;
+            return `- **${(k as any).human_description || k.description}**\n${(k as any).content || k.value}`;
+          })
           .join("\n\n");
         output.system.push(
-          `\n## 用户习惯参考（赛博分身自动维护）\n以下是从你的操作中自动发现的习惯，供参考：\n\n${blockText}\n`
-        );
-        debug(`MEMORY: 注入 ${blocks.length} 个 block`);
-      }
-
-      // 注入 triggers（执行规则）
-      const suggestTriggers = triggers.filter(t => t.status === "suggest");
-      const autoTriggers = triggers.filter(t => t.status === "auto-execute");
-
-      if (autoTriggers.length > 0) {
-        const triggerTexts = autoTriggers.map(t =>
-          `**[自动执行] ${t.human_description}**\n${t.content}`
-        ).join("\n\n");
-        output.system.push(
-          `\n## 自动执行规则（赛博分身确认的习惯）\n即使没有用户指令，你必须在以下情况自动执行对应操作：\n\n${triggerTexts}\n`
+          `\n## 你记录的元知识\n以下是你之前主动要求记住的信息：\n\n${knowledgeText}\n`
         );
       }
 
-      if (suggestTriggers.length > 0) {
-        const triggerTexts = suggestTriggers.map(t =>
-          `**[建议执行] ${t.human_description}**\n${t.content}`
+      // 注入 auto habits（已确认的习惯）
+      if (autoHabits.length > 0) {
+        const triggerTexts = autoHabits.map(t =>
+          `**[已确认的习惯] ${t.human_description}**\n${t.content}`
         ).join("\n\n");
         output.system.push(
-          `\n## 建议执行规则（赛博分身正在观察的习惯）\n建议在以下情况考虑执行对应操作：\n\n${triggerTexts}\n`
+          `\n## 已确认的习惯\n你在以下场景会自然地做这些事——像肌肉记忆一样：\n\n${triggerTexts}\n`
+        );
+      }
+
+      // 注入 suggest habits（观察中的习惯）
+      if (suggestHabits.length > 0) {
+        const triggerTexts = suggestHabits.map(t =>
+          `**[观察中的习惯] ${t.human_description}**\n${t.content}`
+        ).join("\n\n");
+        output.system.push(
+          `\n## 观察中的习惯\n你偶尔在以下场景做这些事，还不够确定，仅供参考：\n\n${triggerTexts}\n`
         );
       }
 
       if (triggers.length > 0) {
-        debug(`MEMORY: 注入 ${autoTriggers.length} 个自动规则 + ${suggestTriggers.length} 个建议规则`);
+        debug(`MEMORY: 注入 ${autoHabits.length} 个已确认 + ${suggestHabits.length} 个观察中 + ${knowledgeItems.length} 个元知识`);
       }
 
-      // 注入例行规则：每次文件操作后请示赛博分身
-      if (triggers.length > 0) {
+      // 注入 pending 确认提示
+      if (pendingCount > 0) {
+        const levelName = (mp: string) => ({ "0": "全局", "1": "个人项目级", "2": "共享项目级" })[mp] || "未知";
+        const pendingList = [
+          ...pendingBlocks.map(b =>
+            `- **${b.description || "（无描述）"}**（建议：${b.suggested_status || "suggest"}·${levelName(b.memPathIndex)}）`
+          ),
+          ...pendingTriggers.map(t =>
+            `- **${t.human_description || "（无描述）"}**（建议：${t.suggested_status || "suggest"}·${levelName(t.memPathIndex)}）`
+          ),
+        ].join("\n");
+        const firstDesc = pendingBlocks[0]?.description || pendingTriggers[0]?.human_description || "新模式";
         output.system.push(
-          `\n## 例行规则\n每次完成文件写入操作后，通过 task tool 调用赛博分身 subagent（助理），附上你刚才做了什么（操作类型、文件路径、简要说明）。这只需很短的时间，就像用户每次做完事后看一眼助理。\n`
+          `\n## ⚠️ 记忆管家发现了新习惯，必须确认后才能继续\n记忆管家自动分析了你的操作，发现了以下新模式。**这是硬性规则（见 AGENTS.md），你必须先用 question 工具逐条确认，确认完成后才能继续执行用户任务。**\n\n${pendingList}\n\n确认方式：用 question 工具，格式参考：\n\`\`\`json\n{ "questions": [{ "question": "记忆管家发现了习惯「${firstDesc}」，是否保存？", "header": "确认习惯", "options": [{"label": "自动·全局", "description": "所有项目适用"}, {"label": "自动·本项目", "description": "仅当前项目"}, {"label": "建议·全局", "description": "观察中，所有项目"}, {"label": "建议·本项目", "description": "观察中，仅本项目"}, {"label": "不保存", "description": "跳过此习惯"}] }] }\n\`\`\`\n用户确认后：\n1. 根据选项编辑 blocks/*.md 文件的 status 为 auto 或 suggest\n2. 如果用户选的层级与 LLM 建议不同，将文件移动到对应 memPath（0=全局，1=个人项目级，2=共享项目级）\n3. 用户选择跳过则删除该文件\n`
         );
       }
+
+      // 注入例行习惯（AGENTS.md 中已有硬性规则，此处为补充说明）
+      output.system.push(
+        `\n## 例行习惯\n每次完成文件写入操作后，通过 task tool 调用赛博分身 subagent（助理），这在 AGENTS.md 中是硬性规则。\n`
+      );
     },
 
     /**
@@ -621,16 +595,16 @@ export const MemoriesPlugin = async (ctx?: { project?: { directory?: string } })
         logEvent(event);
       }
 
-      // 调试：记录事件类型分布
+      // 调试：记录事件类型分布（仅首次遇到新事件类型时记录）
       try {
         const rawLog = path.join(MEMORIES_DIR, "raw-events.log");
         const sample = {
           ts: new Date().toISOString(),
           type: event.type,
           keys: Object.keys(event),
-          propKeys: event.properties ? Object.keys(event.properties) : [],
         };
         fs.appendFileSync(rawLog, JSON.stringify(sample) + "\n", "utf-8");
+        rotateLog(rawLog, 100 * 1024); // raw-events 上限 100KB
       } catch { /* 静默 */ }
     },
 
@@ -645,14 +619,23 @@ export const MemoriesPlugin = async (ctx?: { project?: { directory?: string } })
       const memoryPaths = getMemoryPaths(projectDir);
       const { blocks, triggers } = mergeBlocksAndTriggers(memoryPaths);
 
-      const autoTriggers = triggers.filter(t => t.status === "auto-execute");
-      if (autoTriggers.length > 0) {
-        output.context.push(
-          `## 用户习惯（赛博分身 — 跨会话持久记忆）\n` +
-          blocks.map(b => `- ${b.label}: ${b.description}`).join("\n") +
-          `\n` +
-          autoTriggers.map(t => `- [自动] ${t.human_description}`).join("\n")
-        );
+      const autoHabits = triggers.filter(t => t.type === "habit" && t.status === "auto");
+      const knowledgeItems = triggers.filter(t => t.type === "knowledge" && t.status !== "pending");
+      const hasMemories = autoHabits.length > 0 || knowledgeItems.length > 0;
+
+      if (hasMemories) {
+        const lines: string[] = [];
+        if (autoHabits.length > 0) {
+          lines.push("## 已确认的习惯（跨会话持久）");
+          lines.push(...autoHabits.map(t => `- [auto] ${t.human_description}`));
+          lines.push("");
+        }
+        if (knowledgeItems.length > 0) {
+          lines.push("## 元知识（跨会话持久）");
+          lines.push(...knowledgeItems.map(t => `- ${t.human_description}`));
+          lines.push("");
+        }
+        output.context.push(lines.join("\n"));
         debug("HOOK: session.compacting injected habits");
       }
     },
