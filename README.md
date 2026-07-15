@@ -8,51 +8,36 @@
 增强不替换：所有模块在 OC 原生体系上叠加，不替换原生 agent/tool
 ```
 
-## 当前状态（跨会话同步用——读到这行即知道进度。双星 V1.1 ✅，记忆管家 V1.0 ✅）
+## 当前状态（V3.3 · 2026-07-15）
 
-| 阶段 | 模块 | 状态 | 说明 |
-|------|------|------|------|
-| 一 | Memories Plugin | ✅ Phase 1 MVP | `~/.config/opencode/plugins/memories.ts`，已注册到 opencode.json |
-| 一 | review-habits.md | ✅ | `~/.config/opencode/memories/review-habits.md`，自动维护 |
-| 一 | AGENTS.md（全局规则） | ✅ | `~/.config/opencode/AGENTS.md`，69 行纯净技术规范 |
-| 一 | Superpowers | ✅ | 已安装，14 个 skill |
-| 一 | CC 规则隔离 | ✅ | `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT=1` |
-| 一 | 双星系统 V1.1 | ✅ 已实施 | `.opencode/agents/` 4 个 agent，`/double-star` 命令 |
-| 一 | 记忆管家 V1.0 | ✅ 已实施 | 赛博分身 agent + 三层记忆 + 自主习惯发现 + 触发执行 |
+| 模块 | 版本 | 状态 |
+|------|------|------|
+| 双星系统 | **V3.3** | ✅ 主力智能助手 + 工匠(带LSP) + 参谋/军师顾问 |
+| 记忆管家 | V1.0 | ✅ 三层记忆 + 赛博分身 |
+| AGENTS.md | — | ✅ 全局行为规范 |
+| CC 规则隔离 | — | ✅ `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT=1` |
 
-## 双星系统架构
+## 架构
 
 ```
-用户输入
-    │
-    ▼
-┌──────────────────────────────────────┐
-│     协调层 (双星 / Primary)    │
-│  ┌──────────┐  并行调用  ┌──────────┐ │
-│  │ 左脑     │ ←────────→ │ 右脑     │ │
-│  │ 微观路径  │            │ 宏观目标  │ │
-│  │ temp=0.2 │            │ temp=0.7 │ │
-│  │ 只读     │            │ 只读     │ │
-│  └────┬─────┘            └────┬─────┘ │
-│       │ JSON 摘要              │       │
-│       └──────────┬─────────────┘       │
-│                  ▼                     │
-│         仲裁整合（偏差≥20%→右脑优先）    │
-│                  │                     │
-│            最终指令 + 日志              │
-└──────────────────┬───────────────────┘
-                   │
-                   ▼
-┌──────────────────────────────────────┐
-│    Build Executor (Subagent)          │
-│    执行层 / 全权限 / temp=0.1          │
-│    接收指令 → 执行代码 → 返回结果       │
-└──────────────────────────────────────┘
+双星 (primary)
+  │  智能助手，先对齐理解，再动手
+  │
+  ├─ 非编码 / 简单编码 → 自己干
+  ├─ 搜索 → 提炼关键词再搜
+  │
+  └─ 复杂编码 → 四阶段：
+        ├─ 研究：工匠(×N 并行) 探索代码库
+        ├─ 综合：双星制定规格 + 参谋/军师(可选)
+        ├─ 实现：工匠编码 + 自测
+        └─ 验证：双星亲自 diff + 军师审查
+
+参谋 (subagent, temp 0.7) — 战术纠偏：方向有没有偏离目标？
+军师 (subagent, temp 0.3) — 战略远见：全局代码审视 + 工匠产出审查
+工匠 (subagent, temp 0.1) — CC Worker 风格编码执行者（带 LSP）
 ```
 
-~/.config/opencode/agents/ 下 4 个 agent 定义，通过 `/double-star` 命令启动协作流程。
-
-## 记忆管家架构
+## 记忆管家
 
 ```
 ~/.config/opencode/plugins/memories.ts (668行)
@@ -67,99 +52,37 @@
   ├── events.log        ← 事件原始日志
   ├── debug.log         ← 诊断日志
   └── last-analysis.json ← 分析进度记录
+
+~/.config/opencode/agents/助理.md ← 赛博分身 agent
 ```
 
-## 下一步（读到这行知道该做什么）
-
-1. 记忆管家 V1.0 + 双星系统 V1.1 已完成
-2. 下一步：试运行，积累事件，验证赛博分身 2/4/7 阈值和三层记忆路径
-
-## 文件清单
-
-```
-oc-plus/
-├── README.md               ← 总览 + 进度同步
-├── package.json
-├── .gitignore
-├── 双星系统/
-│   ├── 设计.md              ← 双星系统设计文档
-│   ├── agents/              ← 双星源码（4 agent 定义）
-│   │   ├── 左脑.md
-│   │   ├── 右脑.md
-│   │   ├── 双星.md
-│   │   └── 构建执行器.md
-│   └── commands/
-│       └── double-star.md
-├── 记忆管家/
-│   ├── 设计.md              ← 记忆管家设计文档
-│   ├── memories.ts          ← 记忆管家 Plugin 源码（668行）
-│   └── agents/
-│       └── 助理.md ← 赛博分身 agent 定义
-└── doc/                    ← 计划 / 原型 / 知识
-```
-
-## 全局部署
-
-所有 agent 定义和命令需要部署到全局才能跨项目生效：
-
-```
-~/.config/opencode/
-├── agents/
-│   ├── 左脑.md        ← 从 oc-plus/双星系统/agents/ 复制
-│   ├── 右脑.md
-│   ├── 双星.md
-│   ├── 构建执行器.md
-│   └── 助理.md    ← 从 oc-plus/记忆管家/agents/ 复制
-└── commands/
-    └── double-star.md
-```
-
-## 部署（在新电脑上）
-
-将 oc-plus 目录复制到目标电脑，打开 PowerShell，执行以下步骤：
-
-### 1. 部署 agent 定义
+## 部署
 
 ```powershell
-$OC = "$env:USERPROFILE\.config\opencode"
-New-Item -ItemType Directory -Path "$OC\agents" -Force | Out-Null
-New-Item -ItemType Directory -Path "$OC\commands" -Force | Out-Null
-
-# 逐个复制，不会误伤已有 agent
-Copy-Item ".\双星系统\agents\左脑.md" "$OC\agents\" -Force
-Copy-Item ".\双星系统\agents\右脑.md" "$OC\agents\" -Force
-Copy-Item ".\双星系统\agents\双星.md" "$OC\agents\" -Force
-Copy-Item ".\双星系统\agents\构建执行器.md" "$OC\agents\" -Force
-Copy-Item ".\记忆管家\agents\助理.md" "$OC\agents\" -Force
+.\deploy.ps1
 ```
 
-### 2. 部署命令
+脚本会部署所有 agent（双星/工匠/参谋/军师/助理）、命令和记忆管家插件到 `~/.config/opencode/`。
 
-```powershell
-Copy-Item ".\双星系统\commands\*.md" "$OC\commands\" -Force
-```
+**手动部署或新电脑首次安装时：**
 
-### 3. 部署记忆管家 Plugin
+1. 确保 `opencode.json` 的 `plugin` 数组包含 `"memories"` 和 `"oh-my-opencode-slim"`
+2. 设置环境变量 `OPENCODE_EXPERIMENTAL_LSP_TOOL=true`（LSP 主动工具）
+3. 创建记忆存储目录：
+   ```powershell
+   New-Item -ItemType Directory -Path "$env:USERPROFILE\.config\opencode\memories\blocks" -Force
+   New-Item -ItemType Directory -Path "$env:USERPROFILE\.config\opencode\memories\triggers" -Force
+   ```
+4. 重启 OpenCode
 
-```powershell
-New-Item -ItemType Directory -Path "$OC\plugins" -Force | Out-Null
-Copy-Item ".\记忆管家\memories.ts" "$OC\plugins\memories.ts" -Force
+## 文档
 
-# 创建记忆存储目录
-New-Item -ItemType Directory -Path "$OC\memories\blocks" -Force | Out-Null
-New-Item -ItemType Directory -Path "$OC\memories\triggers" -Force | Out-Null
-```
-
-### 4. 注册 Plugin
-
-编辑 `~/.config/opencode/opencode.json`，确保 `plugin` 数组中包含 `"memories"`：
-
-```json
-{
-  "plugin": ["...其他插件...", "memories"]
-}
-```
-
-### 5. 重启 opencode
-
-重新启动 opencode 后，在任意项目中输入 `/double-star` 测试双星系统，正常使用一段时间后检查 `~/.config/opencode/memories/events.log` 验证记忆管家是否在记录事件。
+| 文档 | 说明 |
+|------|------|
+| `双星系统/设计.md` | V3 架构总览 |
+| `双星系统/版本记录.md` | V1→V3 完整版本历史 |
+| `双星系统/archive/V1/设计.md` | V1 仲裁器架构（已废弃） |
+| `双星系统/archive/V2/设计.md` | V2 智能助手架构（基线） |
+| `doc/设计/双星V3-编码能力升级方案.md` | V3 详细设计方案 |
+| `doc/知识/权限控制机制对比-CC-vs-OC.md` | CC vs OC 权限机制对比 |
+| `doc/知识/skill选型参考.md` | 35 个技能选型指南 |

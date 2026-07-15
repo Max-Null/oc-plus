@@ -1,0 +1,33 @@
+diff --git a/src/index.ts b/src/index.ts
+index 0aa6303..b1c2d4e 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -XXXX,13 +XXXX,16 @@
+         );
+         if (!alreadyInjected) {
+-          // Prepend the orchestrator prompt to the system array. Use the
+-          // resolved prompt from the orchestrator agent definition (which
+-          // includes any custom replacement or append from orchestrator.md
+-          // / orchestrator_append.md) Fall back to
+-          // buildOrchestratorPrompt only if the resolved prompt is
+-          // missing.
+           const orchestratorDef = agentDefs.find(
+             (a) => a.name === 'orchestrator',
+           );
+           const orchestratorPrompt =
+             typeof orchestratorDef?.config?.prompt === 'string'
+               ? orchestratorDef.config.prompt
+               : buildOrchestratorPrompt(disabledAgents);
+-          output.system[0] =
+-            orchestratorPrompt +
+-            (output.system[0] ? `\n\n${output.system[0]}` : '');
++          // Place the orchestrator prompt after AGENTS.md.
++          // AGENTS.md is injected by OpenCode core into system[0] as the
++          // highest-priority behavioral ruleset. Prepending the orchestrator
++          // prompt before it dilutes user-defined rules (language, code
++          // conventions, etc.) under thousands of lines of orchestration
++          // instructions. This affects all users regardless of language.
++          output.system[0] =
++            (output.system[0] || '') +
++            `\n\n${orchestratorPrompt}`;
+         }
