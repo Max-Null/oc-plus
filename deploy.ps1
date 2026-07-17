@@ -1,7 +1,7 @@
 <#-----------------------------------------------------------------------------
    脚本: deploy.ps1
    说明: 部署 oc-plus V3.3 agent 定义、命令和记忆管家 Plugin 到 opencode 配置目录
-   版本: V3.4 | 2026-07-17
+    版本: V3.5 | 2026-07-17
    编码: UTF-8 with BOM
 ------------------------------------------------------------------------------#>
 param()
@@ -18,7 +18,8 @@ $deployments = @(
     @{ Source = ".\记忆管家\agents\助理.md";    TargetDir = "$OC\agents" },
     @{ Source = ".\记忆管家\memories.ts";       TargetDir = "$OC\plugins" },
     @{ Source = ".\记忆管家\prompts.ts";       TargetDir = "$OC\plugins" },
-    @{ Source = ".\记忆管家\scripts\memories-cli.mjs"; TargetDir = "$OC\scripts" }
+    @{ Source = ".\记忆管家\scripts\memories-cli.mjs"; TargetDir = "$OC\scripts" },
+    @{ Source = ".\记忆管家\scripts\test-analyze.mjs"; TargetDir = "$OC\scripts" }
 )
 
 # 命令文件
@@ -32,7 +33,7 @@ $deployed = @()
 $skipped = @()
 $failed = @()
 
-Write-Host "===== oc-plus V3.3 部署 =====" -ForegroundColor Cyan
+Write-Host "===== oc-plus V3.5 部署 =====" -ForegroundColor Cyan
 Write-Host "目标: $OC`n"
 
 # [1/4] 创建目标目录

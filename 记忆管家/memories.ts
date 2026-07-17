@@ -112,11 +112,11 @@ function getMemoryPaths(projectDir?: string): string[] {
  * 高优先级同名文件覆盖低优先级
  */
 function mergeBlocksAndTriggers(memoryPaths: string[]): {
-  blocks: Array<{ type: string; label: string; description: string; confidence: string; status: string; suggested_status: string; memPathIndex: string; value: string }>;
-  triggers: Array<{ type: string; label: string; human_description: string; confidence: string; status: string; suggested_status: string; memPathIndex: string; content: string }>;
+  blocks: Array<{ type: string; label: string; description: string; confidence: string; status: string; suggested_status: string; memPathIndex: string; fileName: string; value: string }>;
+  triggers: Array<{ type: string; label: string; human_description: string; confidence: string; status: string; suggested_status: string; memPathIndex: string; fileName: string; content: string }>;
 } {
-  const blockMap = new Map<string, { type: string; label: string; description: string; confidence: string; status: string; suggested_status: string; memPathIndex: string; value: string }>();
-  const triggerMap = new Map<string, { type: string; label: string; human_description: string; confidence: string; status: string; suggested_status: string; memPathIndex: string; content: string }>();
+  const blockMap = new Map<string, { type: string; label: string; description: string; confidence: string; status: string; suggested_status: string; memPathIndex: string; fileName: string; value: string }>();
+  const triggerMap = new Map<string, { type: string; label: string; human_description: string; confidence: string; status: string; suggested_status: string; memPathIndex: string; fileName: string; content: string }>();
 
   // 从低优先级到高优先级遍历
   for (let pathIndex = 0; pathIndex < memoryPaths.length; pathIndex++) {
@@ -138,6 +138,7 @@ function mergeBlocksAndTriggers(memoryPaths: string[]): {
             status: meta.status || "pending",
             suggested_status: meta.suggested_status || "suggest",
             memPathIndex: String(pathIndex),
+            fileName: file,
             value: extractBlockValue(content),
           });
         }
@@ -161,6 +162,7 @@ function mergeBlocksAndTriggers(memoryPaths: string[]): {
             status: meta.status || "pending",
             suggested_status: meta.suggested_status || "suggest",
             memPathIndex: String(pathIndex),
+            fileName: file,
             content: extractTriggerContent(content),
           });
         }
@@ -267,7 +269,12 @@ function getApiConfig(): { apiKey: string; baseURL: string; model: string } | nu
   try {
     const raw = fs.readFileSync(configPath, "utf-8");
     const config = JSON.parse(raw);
-    const model = config.model || "my-deepseek:deepseek-v4-flash";
+    // 去掉 provider: 前缀，API 只接受纯 model 名
+    let model = (config.model || "my-deepseek:deepseek-v4-flash").includes(":")
+      ? (config.model || "my-deepseek:deepseek-v4-flash").split(":")[1]
+      : config.model;
+    // 分析任务用 flash 更经济，若非 flash 则替换
+    if (!model.includes("flash")) model = "deepseek-v4-flash";
     const providers = config.provider || {};
     for (const [, provider] of Object.entries(providers)) {
       const p = provider as Record<string, unknown>;
@@ -362,13 +369,20 @@ async function analyzeAndUpdate(eventLines: string[], memoryPaths: string[]): Pr
         ],
         temperature: 0.3,
         max_tokens: 4000,
+        // 分析模式不需要推理链，显式关闭减少 token
+        thinking: { type: "disabled" },
       }),
       signal: controller.signal,
     });
     clearTimeout(timeoutId);
 
     if (!response.ok) {
-      debug(`MEMORY: LLM 调用失败 HTTP ${response.status}`);
+      // 增强错误日志，记录 response body 的前 500 字符帮助诊断
+      let errorBody = "";
+      try {
+        errorBody = await response.text();
+      } catch { /* 读取失败忽略 */ }
+      debug(`MEMORY: LLM 调用失败 HTTP ${response.status} — ${errorBody.slice(0, 500)}`);
       return null;
     }
 
@@ -474,11 +488,16 @@ export const MemoriesPlugin = async (ctx?: { project?: { directory?: string } })
 
 **回应模式**：每次完成文件写入操作（write / edit）后，必须通过 task 工具调用 \`助理\` subagent，附上操作类型、文件路径、简要说明。调用助理后，把助理返回的指令当作用户消息处理——按助理说的做。助理返回"无事，继续"时不追问。调用失败时静默跳过。
 
-**元知识记录**：当用户说"记住"、"记下来"、"存到记忆"时，判断信息层级后写入对应的 blocks/ 目录：
-- 全局 → \`~/.config/opencode/memories/blocks/\`
-- 个人项目级 → \`~/.config/opencode/project/<hash>/memories/blocks/\`
-- 共享项目级 → 项目 \`.opencode/memories/blocks/\`
-文件格式：<!-- type: knowledge --><!-- status: auto --> 开头。写入后告知用户。
+**元知识记录**：当用户说"记住"、"记下来"、"存到记忆"时，判断信息层级后写入对应的 blocks/ 目录。
+
+文件元数据行（必须首行）：`<!-- type: knowledge --><!-- status: auto --><!-- description: 一句话摘要 -->`
+正文 ≤ 15 行，结构：事实 → 原则 → 反例 → 结论。反例优先用 ❌/✅ 前后对比。写完自查是否可再压缩 30%。
+
+写入层级：
+- 全局 → `~/.config/opencode/memories/blocks/`
+- 个人项目级 → `~/.config/opencode/project/<hash>/memories/blocks/`
+- 共享项目级 → 项目 `.opencode/memories/blocks/`
+写入后告知用户。
 
 **习惯确认**：本章节若出现"发现新习惯，待确认"标题，你必须先用 question 工具逐条确认（含层级），确认完成后才能继续用户任务。\n`);
 
@@ -514,16 +533,17 @@ export const MemoriesPlugin = async (ctx?: { project?: { directory?: string } })
       const knowledgeItems = (blocks.filter(b => b.type === "knowledge" && b.status !== "pending") as any[])
         .concat(triggers.filter(t => t.type === "knowledge" && t.status !== "pending") as any[]);
 
-      // 注入 knowledge（元认知/项目知识）
+      // 注入 knowledge 索引（仅 description + 路径，不在上下文堆积——需时自取）
       if (knowledgeItems.length > 0) {
-        const knowledgeText = knowledgeItems
-          .map(k => {
-            const meta = (k as any).human_description ? (k as any) : k;
-            return `- **${(k as any).human_description || k.description}**\n${(k as any).content || k.value}`;
-          })
-          .join("\n\n");
+        const indexLines = knowledgeItems.map(k => {
+          const desc = (k as any).human_description || k.description;
+          const mp = memoryPaths[parseInt((k as any).memPathIndex, 10)] || MEMORIES_DIR;
+          const subDir = (k as any).human_description !== undefined ? "triggers" : "blocks";
+          const filePath = `${mp}/${subDir}/${(k as any).fileName}`.replace(HOME, "~");
+          return `- **${desc}** → \`${filePath}\``;
+        });
         output.system.push(
-          `\n## 你记录的元知识\n以下是你之前主动要求记住的信息：\n\n${knowledgeText}\n`
+          `\n## 你记录的元知识索引\n以下是你之前记录的元知识摘要。遇到相关话题时，用 read 工具读取完整内容：\n\n${indexLines.join("\n")}\n`
         );
       }
 
@@ -620,8 +640,11 @@ export const MemoriesPlugin = async (ctx?: { project?: { directory?: string } })
       const { blocks, triggers } = mergeBlocksAndTriggers(memoryPaths);
 
       const autoHabits = triggers.filter(t => t.type === "habit" && t.status === "auto");
-      const knowledgeItems = triggers.filter(t => t.type === "knowledge" && t.status !== "pending");
-      const hasMemories = autoHabits.length > 0 || knowledgeItems.length > 0;
+      // 压缩时兜底全量注入 knowledge（blocks + triggers），防丢失
+      const blockKnowledge = blocks.filter(b => b.type === "knowledge" && b.status !== "pending");
+      const triggerKnowledge = triggers.filter(t => t.type === "knowledge" && t.status !== "pending");
+      const allKnowledge = [...blockKnowledge, ...triggerKnowledge];
+      const hasMemories = autoHabits.length > 0 || allKnowledge.length > 0;
 
       if (hasMemories) {
         const lines: string[] = [];
@@ -630,10 +653,16 @@ export const MemoriesPlugin = async (ctx?: { project?: { directory?: string } })
           lines.push(...autoHabits.map(t => `- [auto] ${t.human_description}`));
           lines.push("");
         }
-        if (knowledgeItems.length > 0) {
-          lines.push("## 元知识（跨会话持久）");
-          lines.push(...knowledgeItems.map(t => `- ${t.human_description}`));
-          lines.push("");
+        if (allKnowledge.length > 0) {
+          lines.push("## 元知识（跨会话持久，全量兜底）");
+          // 压缩时不再只注入摘要——全量注入防止丢失
+          for (const k of allKnowledge) {
+            const desc = (k as any).human_description || k.description;
+            const body = (k as any).content || k.value;
+            lines.push(`### ${desc}`);
+            lines.push(body);
+            lines.push("");
+          }
         }
         output.context.push(lines.join("\n"));
         debug("HOOK: session.compacting injected habits");

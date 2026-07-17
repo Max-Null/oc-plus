@@ -7,7 +7,7 @@
 | 模块 | 版本 | 状态 |
 |------|------|------|
 | 双星系统 | V3.3 | ✅ 主力运作中 |
-| 记忆管家 | V1.3 | ⬜ 试运行验证中 |
+| 记忆管家 | V1.3.1 | ⬜ 待重启验证 LLM 分析修复 |
 | AGENTS.md | — | ✅ 持续维护 |
 | CC 规则隔离 | — | ✅ |
 
@@ -15,38 +15,36 @@
 
 ## 二、记忆管家 — 待办
 
-### 2.1 试运行验证 ⬜
+### 2.1 试运行验证（2026-07-17 结果）
 
-部署已就绪（2026-07-17），待重启 OC 后进行以下验证：
+| 检查项 | 状态 | 说明 |
+|--------|------|------|
+| 插件加载 | ✅ | system.transform 正常触发，debug.log 有日志 |
+| system.transform 注入 | ✅ | 规则和记忆已注入 system prompt |
+| event hook 记录事件 | ✅ | events.log 已累积 40MB（4135 条） |
+| LLM 自主学习 | ✅ **已修复并验证** | 连通性测试 HTTP 200 + 端到端测试 JSON 正常；`last-analysis.json` 已清零，重启 OC 即触发分析 |
+| `/memories` 命令 | ⚠️ | CLI 脚本已部署、命令已配置，但模板有中文乱码 |
+| 回应模式 | ⚠️ | 规则已注入但未实际验证效果 |
 
-- [ ] 插件加载（检查 debug.log）
-- [ ] system.transform 注入记忆到 system prompt
-- [ ] event hook 记录事件
-- [ ] 累积 20+ 事件后触发 LLM 分析
-- [ ] `/memories` 命令可用
-- [ ] 回应模式正常（写文件后调 助理 subagent）
+**修复内容**（V1.3.1）：
+- `getApiConfig()` 中去掉 model 的 `my-deepseek:` 前缀，分析任务强制用 flash 模型
+- API 调用增加 `thinking: { type: "disabled" }` 节省 token
+- 增强错误日志：记录 HTTP 响应体前 500 字符
+- 新增 `test-analyze.mjs` 端到端测试脚本（直接调 API 验证分析流程）
+- 已通过连通性测试（HTTP 200）和端到端测试（JSON 正常返回）
 
-### 2.2 替代升级路径 📋
+### 2.2 替代升级路径 📋 — 前置条件已确认 ✅
 
-**当前方案**：system.transform 中写死规则 → 主 agent 读规则 → 调 助理 subagent
+**2026-07-17 SDK 验证结果**：
+- `client.session.prompt` API **存在**（SDK v1.17.12，`Session.prompt()` 和 `Session.promptAsync()`）
+- Plugin 可通过 `PluginInput.client` **访问** `OpencodeClient`
+- 当前 memories.ts 签名不兼容 `PluginInput`，**需要升级签名**
 
-**问题**：回应逻辑分散在两处（plugin 注入规则 + 助理.md agent 定义），维护成本高。
-
-**替代方案**：event hook + `client.session.prompt`
-
-```
-event hook 监听 file.edited（或其他文件事件）
-  → 匹配 triggers/ 中的触发条件
-  → client.session.prompt({ noReply: true }) 注入消息到会话
-  → 主 agent 自然响应
-```
-
-**收益**：
-- 回应逻辑集中在 助理.md，plugin 只负责匹配和注入
-- 不再需要在 system.transform 中维护「写完文件后调助理」的硬规则
-- 与双星系统的职责更正交
-
-**前置条件**：opencode SDK 需暴露 `client.session.prompt` API（当前是否可用待验证）
+**升级步骤**（V2.0）：
+1. 将 `MemoriesPlugin` 签名从 `(ctx?)` 改为标准 `(input: PluginInput, options?) => Promise<Hooks>`
+2. 从 system.transform 中移除硬编码的「写完文件后调助理」规则
+3. 在 `event` hook 中监听 `file.edited` → 匹配 triggers/ → `client.session.prompt()` 注入消息
+4. 回应逻辑完全集中在 助理.md agent 定义中
 
 ### 2.3 理想升级路径 📋
 
@@ -60,7 +58,22 @@ event hook 监听 file.edited（或其他文件事件）
 
 ## 三、双星系统 — 待办
 
-（待补充）
+### 3.1 V3.4 — 记忆集成优化
+
+- [ ] 双星 agent prompt 中增加「参考记忆管家」指引：决策前检查 blocks/ 中是否有相关习惯
+- [ ] 观察记忆管家 V1.3.1 LLM 分析修复后，blocks/ 和 triggers/ 的生成质量和频率
+- [ ] 如果 triggers/ 生成了 auto 级别的习惯，验证双星是否正确执行
+
+### 3.2 V4.0 — 深度集成方向
+
+- [ ] **记忆驱动工作流**：双星启动时主动读取 blocks/ 中的知识记忆，作为决策上下文
+- [ ] **自动化习惯执行**：auto 状态的习惯直接成为双星的默认行为，不再通过 question 工具确认
+- [ ] **双星自身习惯学习**：observability — 记录双星的决策链（为什么选这个方案），用于回溯和优化
+- [ ] **工匠 LSP 深度使用**：工匠目前有 LSP 权限但使用偏基础，补充 goToDefinition / callHierarchy 等用法的具体指导
+
+### 3.3 已知问题
+
+- [ ] opencode.json 中 `/memories` 命令 template 有中文乱码（PowerShell GBK 编码问题）
 
 ---
 
@@ -69,3 +82,4 @@ event hook 监听 file.edited（或其他文件事件）
 - [x] `doc/计划/README.md` 完善索引
 - [x] 部署脚本 `deploy.ps1` 覆盖记忆管家 CLI 脚本和 prompts.ts
 - [x] README.md 中记忆管家版本号更新为 V1.3
+- [ ] 修复 opencode.json 中 `/memories` 命令模板乱码 => 转为 UTF-8
