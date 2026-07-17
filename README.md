@@ -13,7 +13,7 @@
 | 模块 | 版本 | 状态 |
 |------|------|------|
 | 双星系统 | **V3.3** | ✅ 主力智能助手 + 工匠(带LSP) + 参谋/军师顾问 |
-| 记忆管家 | V1.0 | ✅ 三层记忆 + 赛博分身 |
+| 记忆管家 | V1.3 | ✅ 三层记忆 + 赛博分身 + CLI工具 + 语义化置信度 |
 | AGENTS.md | — | ✅ 全局行为规范 |
 | CC 规则隔离 | — | ✅ `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT=1` |
 
@@ -40,7 +40,7 @@
 ## 记忆管家
 
 ```
-~/.config/opencode/plugins/memories.ts (668行)
+~/.config/opencode/plugins/memories.ts (643行)
   ├── system.transform → 注入 blocks + triggers 到 system prompt
   ├── event            → 记录 message/file/tool 事件到 events.log
   ├── 分析触发          → 新会话启动时检查增量，LLM 自主学习习惯

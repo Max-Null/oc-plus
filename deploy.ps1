@@ -1,7 +1,7 @@
 <#-----------------------------------------------------------------------------
    脚本: deploy.ps1
    说明: 部署 oc-plus V3.3 agent 定义、命令和记忆管家 Plugin 到 opencode 配置目录
-   版本: V3.3 | 2026-07-15
+   版本: V3.4 | 2026-07-17
    编码: UTF-8 with BOM
 ------------------------------------------------------------------------------#>
 param()
@@ -16,7 +16,9 @@ $deployments = @(
     @{ Source = ".\双星系统\agents\参谋.md";   TargetDir = "$OC\agents" },
     @{ Source = ".\双星系统\agents\军师.md";   TargetDir = "$OC\agents" },
     @{ Source = ".\记忆管家\agents\助理.md";    TargetDir = "$OC\agents" },
-    @{ Source = ".\记忆管家\memories.ts";       TargetDir = "$OC\plugins" }
+    @{ Source = ".\记忆管家\memories.ts";       TargetDir = "$OC\plugins" },
+    @{ Source = ".\记忆管家\prompts.ts";       TargetDir = "$OC\plugins" },
+    @{ Source = ".\记忆管家\scripts\memories-cli.mjs"; TargetDir = "$OC\scripts" }
 )
 
 # 命令文件
@@ -35,7 +37,7 @@ Write-Host "目标: $OC`n"
 
 # [1/4] 创建目标目录
 Write-Host "[1/4] 创建目录..." -ForegroundColor Yellow
-$requiredDirs = @("$OC\agents", "$OC\commands", "$OC\plugins") + $memoryDirs
+$requiredDirs = @("$OC\agents", "$OC\commands", "$OC\plugins", "$OC\scripts") + $memoryDirs
 foreach ($dir in $requiredDirs) {
     if (-not (Test-Path -LiteralPath $dir)) {
         try { New-Item -ItemType Directory -Path $dir -Force | Out-Null; Write-Host "  + $dir" }
