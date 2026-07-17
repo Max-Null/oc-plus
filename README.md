@@ -86,4 +86,31 @@
 | `双星系统/archive/V2/设计.md` | V2 智能助手架构（基线） |
 | `doc/设计/双星V3-编码能力升级方案.md` | V3 详细设计方案 |
 | `doc/知识/权限控制机制对比-CC-vs-OC.md` | CC vs OC 权限机制对比 |
+| `doc/知识/CC插件系统-OC改造参考.md` | CC插件系统 vs OC 插件 API 对比分析 |
 | `doc/知识/skill选型参考.md` | 35 个技能选型指南 |
+
+## 目录结构
+
+```
+oc-plus/
+├── 双星系统/           ← 协作系统：primary agent + 3 个顾问 subagent
+│   ├── agents/         Agent 定义（双星/工匠/参谋/军师）
+│   ├── commands/       自定义命令（double-star）
+│   └── archive/        历史版本归档
+├── 记忆管家/           ← 记忆系统：三层记忆 + 赛博分身 + 断言检测
+│   ├── agents/         助理 agent 定义（赛博分身）
+│   ├── scripts/        CLI 工具（memories-cli / test-analyze）
+│   ├── memories.ts     插件源码
+│   ├── prompts.ts      LLM prompt 模板
+│   └── 设计.md         设计文档
+├── 技能/               ← 自定义 skill（mxy- 系列 8 个 + mxy-commit-review）
+├── doc/                ← 项目文档
+│   ├── 知识/           CC vs OC 对比分析 + API 速查
+│   ├── 设计/           功能设计方案
+│   ├── 计划/           项目计划、排期
+│   └── 原型/           产品原型
+├── .opencode/          ← 项目级 OC 配置（memory blocks 等）
+├── deploy.ps1          部署脚本
+├── package.json        插件依赖声明
+└── README.md           本文件
+```
