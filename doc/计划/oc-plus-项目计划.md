@@ -7,7 +7,7 @@
 | 模块 | 版本 | 状态 |
 |------|------|------|
 | 双星系统 | V3.4 | ✅ skill感知 + 修改审查 + agents-priority |
-| 记忆管家 | V1.3.1 | ⬜ 待重启验证 LLM 分析修复 |
+| 记忆管家 | V2.0 | ✅ 插件签名升级 + event hook 触发器匹配 |
 | AGENTS.md | — | ✅ 持续维护 |
 | CC 规则隔离 | — | ✅ |
 
@@ -33,18 +33,13 @@
 - 新增 `test-analyze.mjs` 端到端测试脚本（直接调 API 验证分析流程）
 - 已通过连通性测试（HTTP 200）和端到端测试（JSON 正常返回）
 
-### 2.2 替代升级路径 📋 — 前置条件已确认 ✅
+### 2.2 替代升级路径 ✅ 已完成（2026-07-17）
 
-**2026-07-17 SDK 验证结果**：
-- `client.session.prompt` API **存在**（SDK v1.17.12，`Session.prompt()` 和 `Session.promptAsync()`）
-- Plugin 可通过 `PluginInput.client` **访问** `OpencodeClient`
-- 当前 memories.ts 签名不兼容 `PluginInput`，**需要升级签名**
-
-**升级步骤**（V2.0）：
-1. 将 `MemoriesPlugin` 签名从 `(ctx?)` 改为标准 `(input: PluginInput, options?) => Promise<Hooks>`
-2. 从 system.transform 中移除硬编码的「写完文件后调助理」规则
-3. 在 `event` hook 中监听 `file.edited` → 匹配 triggers/ → `client.session.prompt()` 注入消息
-4. 回应逻辑完全集中在 助理.md agent 定义中
+**升级内容**（V2.0）：
+1. ✅ `MemoriesPlugin` 签名从 `(ctx?)` 改为标准 `(input: PluginInput, options?) => Promise<Hooks>`
+2. ✅ system.transform 中移除硬编码的「写完文件后调助理」规则（保留元知识记录和习惯确认）
+3. ✅ event hook 中监听 `file.edited` / `tool.execute.after` → 解析 trigger 文件 glob 规则 → `client.session.promptAsync()` 注入消息
+4. ✅ 回应逻辑不再依赖 task tool 调用助理，改由 event hook 自动触发
 
 ### 2.3 理想升级路径 📋
 
