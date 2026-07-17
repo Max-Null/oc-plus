@@ -518,9 +518,14 @@ function parseTriggerFile(content: string): { match: string[]; exclude: string[]
 
 /**
  * 检查给定文件路径是否匹配任意 auto 状态的 trigger
- * 返回匹配的触发消息模板（含 {filename} 占位），或 null
+ * 返回匹配的 trigger 完整信息，或 null
  */
-function matchFileTriggers(filePath: string, projectDir?: string): string | null {
+function matchFileTriggers(filePath: string, projectDir?: string): {
+  fullContent: string;       // trigger 文件完整内容（供 LLM 语义判断）
+  humanDescription: string;  // 元数据中的人类可读描述
+  confidence: string;        // 置信度
+  matchGlobs: string;        // 匹配的 glob 列表（供透明度标注）
+} | null {
   const memoryPaths = getMemoryPaths(projectDir);
   for (const memPath of memoryPaths) {
     const triggersDir = path.join(memPath, "triggers");
@@ -541,13 +546,104 @@ function matchFileTriggers(filePath: string, projectDir?: string): string | null
         // 检查 match
         const isMatched = parsed.match.some(g => globToRegex(g).test(filePath));
         if (isMatched) {
-          const filename = path.basename(filePath);
-          return parsed.messageTemplate.replace(/\{filename\}/g, filename);
+          const meta = parseMeta(content, 400);
+          return {
+            fullContent: content,
+            humanDescription: meta?.human_description || file,
+            confidence: meta?.confidence || "unknown",
+            matchGlobs: parsed.match.join(", "),
+          };
         }
       }
     } catch { /* 静默 */ }
   }
   return null;
+}
+
+/**
+ * V2.0 第二层：调 LLM API 做语义判断 + 生成赛博分身消息（含透明度标注）
+ * 异步，不阻塞事件管线
+ */
+async function generateTriggerMessage(
+  filePath: string,
+  trigger: { fullContent: string; humanDescription: string; confidence: string; matchGlobs: string }
+): Promise<string | null> {
+  const config = await getApiConfig();
+  if (!config) {
+    debug("TRIGGER: 无法获取 API 配置，跳过 LLM 语义判断");
+    return null;
+  }
+
+  const filename = path.basename(filePath);
+  const systemPrompt = `你是用户的赛博分身。你像用户一样思考。
+
+当前场景：
+- 用户刚编辑了文件：${filePath}
+- 匹配到的习惯规则：
+
+${trigger.fullContent}
+
+你的任务：
+1. 判断此次文件编辑是否真正匹配此习惯的语义
+   （不只看文件名匹配 glob，要理解操作上下文和改动性质）
+2. 如果匹配，以用户口吻生成一条提醒消息。格式：
+
+> [记忆管家] 匹配习惯「${trigger.humanDescription}」
+> (glob: ${trigger.matchGlobs}) | 置信度 ${trigger.confidence}
+
+你刚生成了 ${filename}，按我的习惯，你先审查一遍。
+重点看：[根据 trigger 中 action.focus 的具体内容填充]
+
+3. 如果不匹配（例如改动太小、不是目标文件类型），返回空字符串
+   （不要任何解释文字）
+4. 措辞必须用"按我的习惯"——你是用户的分身在说话
+5. 不执行审查，不写文件，只说话
+
+返回纯文本（不要 JSON 包裹）。`;
+
+  try {
+    debug(`TRIGGER: 调 LLM 语义判断 — ${filename} (习惯: ${trigger.humanDescription})`);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s 超时
+    const response = await fetch(`${config.baseURL}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${config.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: config.model,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: `文件路径：${filePath}` },
+        ],
+        temperature: 0.3,
+        max_tokens: 500,
+        thinking: { type: "disabled" },
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      debug(`TRIGGER: LLM 调用失败 HTTP ${response.status}`);
+      return null;
+    }
+
+    const data = await response.json() as {
+      choices?: Array<{ message?: { content?: string } }>;
+    };
+    const result = data.choices?.[0]?.message?.content || null;
+    if (!result || result.trim() === "") {
+      debug("TRIGGER: LLM 判断不匹配，静默跳过");
+      return null;
+    }
+    debug(`TRIGGER: LLM 返回 ${result.length} bytes`);
+    return result.trim();
+  } catch (err) {
+    debug(`TRIGGER: LLM 调用异常 ${String(err)}`);
+    return null;
+  }
 }
 
 // ============================================================
@@ -737,7 +833,7 @@ export const MemoriesPlugin = async (input: PluginInput, options?: PluginOptions
         tryTriggerMatch(event);
       }
 
-      // V2.0：尝试匹配触发器并注入消息（不 await，防止阻塞事件管线）
+      // V2.0：三层漏斗 — glob 预筛选 → LLM 语义判断 → prompt 注入（不 await）
       function tryTriggerMatch(evt: { type: string; properties?: Record<string, unknown> }) {
         const props = evt.properties;
         if (!props) return;
@@ -747,28 +843,36 @@ export const MemoriesPlugin = async (input: PluginInput, options?: PluginOptions
           (props.params as any)?.filePath) as string | undefined;
         if (!filePath || typeof filePath !== "string") return;
 
-        const msg = matchFileTriggers(filePath, projectDir);
-        if (!msg) return;
+        // 第一层：glob 预筛选
+        const trigger = matchFileTriggers(filePath, projectDir);
+        if (!trigger) return;
 
-        // 从事件属性提取 session ID（兼容不同事件格式）
+        // 从事件属性提取 session ID
         const sessionID = (props.sessionID || (props.info as any)?.id) as string | undefined;
         if (!sessionID) {
           debug("TRIGGER: 无法获取 sessionID，跳过 prompt 注入");
           return;
         }
 
-        debug(`TRIGGER: 匹配 ${filePath} → "${msg.slice(0, 60)}..."`);
-        // promptAsync 非阻塞 + noReply，不影响事件管线
-        client.session.promptAsync({
-          path: { id: sessionID },
-          body: {
-            noReply: true,
-            parts: [{ type: "text", text: msg }],
-          },
-        }).then(() => {
-          debug(`TRIGGER: prompt 注入成功 — ${filePath}`);
+        debug(`TRIGGER: glob 匹配 ${filePath} → 习惯「${trigger.humanDescription}」，异步调 LLM 语义判断...`);
+
+        // 二+三层：异步调 LLM 生成消息（含透明度标注）→ 注入（不 await 主流程）
+        generateTriggerMessage(filePath, trigger).then((msg) => {
+          if (!msg) return; // LLM 判断不匹配，静默跳过
+
+          client.session.promptAsync({
+            path: { id: sessionID },
+            body: {
+              noReply: true,
+              parts: [{ type: "text", text: msg }],
+            },
+          }).then(() => {
+            debug(`TRIGGER: prompt 注入成功 — ${filePath}`);
+          }).catch((err: unknown) => {
+            debug(`TRIGGER: prompt 注入失败 — ${String(err)}`);
+          });
         }).catch((err: unknown) => {
-          debug(`TRIGGER: prompt 注入失败 — ${String(err)}`);
+          debug(`TRIGGER: LLM 语义判断异常 — ${String(err)}`);
         });
       }
 
