@@ -17,7 +17,8 @@ export function getSystemPrompt(): string {
 <!-- type: habit | knowledge -->
 <!-- label: 标签名 -->
 <!-- description: 简短描述（给 LLM 看） -->
-<!-- confidence: 确认次数/总观察次数 -->
+<!-- confidence: high | medium | low -->
+<!-- confidence_reason: 置信度判断依据（一句话） -->
 <!-- status: pending | suggest | auto -->
 <!-- suggested_status: suggest | auto（仅 pending 时有） -->
 
@@ -30,7 +31,8 @@ export function getSystemPrompt(): string {
 <!-- type: habit | knowledge -->
 <!-- label: 标签名 -->
 <!-- human_description: 给人看的说明 -->
-<!-- confidence: x/y -->
+<!-- confidence: high | medium | low -->
+<!-- confidence_reason: 置信度判断依据（一句话） -->
 <!-- status: pending | suggest | auto -->
 <!-- suggested_status: suggest | auto（仅 pending 时有） -->
 
@@ -68,18 +70,28 @@ status 决定「执行态度」：
 | pending | 新发现，待用户确认 | LLM 分析后初始状态 |
 | auto | 已确认的肌肉记忆，agent 自动执行 | 用户确认后设为 auto |
 | suggest | 观察中的习惯，agent 参考但不强制 | 用户确认后设为 suggest |
-| observing | 刚发现，只记录不触发 | 首次发现，confidence 低 |
 
-## 置信度 → suggested_status 映射
+## 置信度判断（由你自主判定，不按固定次数）
 
-LLM 分析出新习惯后，status 一律初始为 pending，同时提供 suggested_status 供用户参考：
+LLM 分析出新习惯后，status 一律初始为 pending，同时提供 confidence + suggested_status 供用户参考。
 
-- 2-3 次：suggested_status=suggest，只写 block，不写 trigger
-- 4-6 次：suggested_status=suggest，写 block + trigger
-- 7+ 次：suggested_status=auto，写 block + trigger
-- 已有习惯再次确认：更新 confidence，但不改变 status（除非用户重新确认）
+你根据**上下文综合判断**置信度，不依赖"出现了几次"这种硬数字。考虑以下维度：
 
-用户最终决定用哪个 status，你的 suggested_status 只是建议。
+| 维度 | 高置信度特征 | 低置信度特征 |
+|------|-------------|-------------|
+| 时间密度 | 同一会话内频繁出现 | 跨度几天才出现一次 |
+| 跨上下文一致性 | 多个项目/多个文件类型都出现 | 仅限某个特定场景 |
+| 操作紧密度 | A 操作后几乎总是紧接 B | A 和 B 之间经常有其他操作 |
+| 用户主动程度 | 用户手动执行，有明确意图 | 被动触发或可能是偶然 |
+
+confidence 级别：
+- **high**：建议 suggested_status=auto，有明确的跨上下文、高密度证据
+- **medium**：建议 suggested_status=suggest，有一定重复但证据不够强
+- **low**：建议 suggested_status=suggest，只写 block 不写 trigger，继续观察
+
+已发现习惯再次确认时：更新 confidence 和 confidence_reason，但不改变 status（除非用户重新确认）。
+
+用户最终决定用哪个 status，你的判断只是建议。
 
 ## 边界：你记什么，AGENTS.md 记什么
 
@@ -104,9 +116,9 @@ LLM 分析出新习惯后，status 一律初始为 pending，同时提供 sugges
    - 用户 A 操作后经常 B 操作（如"生成文档后手动审查"）
    - 用户反复纠正同一类错误（如"反复指出命名不规范"）
    - 用户对某些工具/命令有偏好
-2. 发现新模式 → 创建 block 文件，status=pending，type=habit
-3. 已有模式再次确认 → 更新 confidence 计数
-4. 跨过阈值 → 同时创建/更新 trigger 文件，status=pending
+2. 发现新模式 → 创建 block 文件，status=pending，type=habit，根据上文维度判断 confidence
+3. 已有模式再次确认 → 更新 confidence + confidence_reason（非单纯计数，注意时间密度和跨上下文变化）
+4. confidence 升级 → 同时创建/更新 trigger 文件，status=pending
 5. 没有新发现 → 返回 "NO_NEW_HABITS"
 6. 不确定是不是习惯 → 宁可不记，不瞎猜
 
@@ -121,6 +133,8 @@ LLM 分析出新习惯后，status 一律初始为 pending，同时提供 sugges
       "file": "文件名（如 review-habits.md）",
       "memPath": "0=全局 1=个人项目级 2=共享项目级",
       "content": "文件完整内容（UTF-8，含元数据注释）。新建文件的 status 必须为 pending",
+      "confidence_level": "high | medium | low（新建时必填，更新已有文件时省略）",
+      "confidence_reason": "置信度判断依据（新建时必填，更新已有文件时省略）",
       "suggested_status": "suggest | auto（新建时必填，更新已有文件时省略）",
       "reason": "为什么做这个操作（一句话）"
     }
