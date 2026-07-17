@@ -6,7 +6,7 @@
 
 | 模块 | 版本 | 状态 |
 |------|------|------|
-| 双星系统 | V3.3 | ✅ 主力运作中 |
+| 双星系统 | V3.4 | ✅ skill感知 + 修改审查 + agents-priority |
 | 记忆管家 | V1.3.1 | ⬜ 待重启验证 LLM 分析修复 |
 | AGENTS.md | — | ✅ 持续维护 |
 | CC 规则隔离 | — | ✅ |
@@ -58,20 +58,27 @@
 
 ## 三、双星系统 — 待办
 
-### 3.1 V3.4 — 记忆集成优化
+### 3.1 V3.4 — skill 感知 + 修改审查（✅ 已完成 2026-07-17）
+
+- [x] 双星 agent 新增 skill 感知：执行任务前先检查 available_skills
+- [x] 双星 agent 新增修改审查：改前计划 + 改后验证
+- [x] agents-priority 插件：确保 AGENTS.md 中文规范不被 omo-slim 英文 prompt 淹没
+- [x] deploy.ps1 支持项目级记忆目录 + agents-priority 部署
+
+### 3.2 V3.5 — 记忆集成优化
 
 - [ ] 双星 agent prompt 中增加「参考记忆管家」指引：决策前检查 blocks/ 中是否有相关习惯
 - [ ] 观察记忆管家 V1.3.1 LLM 分析修复后，blocks/ 和 triggers/ 的生成质量和频率
 - [ ] 如果 triggers/ 生成了 auto 级别的习惯，验证双星是否正确执行
 
-### 3.2 V4.0 — 深度集成方向
+### 3.3 V4.0 — 深度集成方向
 
 - [ ] **记忆驱动工作流**：双星启动时主动读取 blocks/ 中的知识记忆，作为决策上下文
 - [ ] **自动化习惯执行**：auto 状态的习惯直接成为双星的默认行为，不再通过 question 工具确认
 - [ ] **双星自身习惯学习**：observability — 记录双星的决策链（为什么选这个方案），用于回溯和优化
 - [ ] **工匠 LSP 深度使用**：工匠目前有 LSP 权限但使用偏基础，补充 goToDefinition / callHierarchy 等用法的具体指导
 
-### 3.3 已知问题
+### 3.4 已知问题
 
 - [ ] opencode.json 中 `/memories` 命令 template 有中文乱码（PowerShell GBK 编码问题）
 

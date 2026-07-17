@@ -1,7 +1,7 @@
 <#-----------------------------------------------------------------------------
-   脚本: deploy.ps1
-   说明: 部署 oc-plus V3.3 agent 定义、命令和记忆管家 Plugin 到 opencode 配置目录
-    版本: V3.5 | 2026-07-17
+    脚本: deploy.ps1
+    说明: 部署 oc-plus V3.4 agent 定义、命令和记忆管家 Plugin 到 opencode 配置目录
+    版本: V3.6 | 2026-07-17
    编码: UTF-8 with BOM
 ------------------------------------------------------------------------------#>
 param()
@@ -19,21 +19,22 @@ $deployments = @(
     @{ Source = ".\记忆管家\memories.ts";       TargetDir = "$OC\plugins" },
     @{ Source = ".\记忆管家\prompts.ts";       TargetDir = "$OC\plugins" },
     @{ Source = ".\记忆管家\scripts\memories-cli.mjs"; TargetDir = "$OC\scripts" },
-    @{ Source = ".\记忆管家\scripts\test-analyze.mjs"; TargetDir = "$OC\scripts" }
+    @{ Source = ".\记忆管家\scripts\test-analyze.mjs"; TargetDir = "$OC\scripts" },
+    @{ Source = ".\agents-priority.ts";           TargetDir = "$OC\plugins" }
 )
 
 # 命令文件
 $commandSource = ".\双星系统\commands\*.md"
 $commandTargetDir = "$OC\commands"
 
-# 记忆存储子目录
-$memoryDirs = @("$OC\memories\blocks", "$OC\memories\triggers")
+# 记忆存储子目录（全局 + 项目级）
+$memoryDirs = @("$OC\memories\blocks", "$OC\memories\triggers", "$PSScriptRoot\.opencode\memories\blocks", "$PSScriptRoot\.opencode\memories\triggers")
 
 $deployed = @()
 $skipped = @()
 $failed = @()
 
-Write-Host "===== oc-plus V3.5 部署 =====" -ForegroundColor Cyan
+Write-Host "===== oc-plus V3.4 部署 =====" -ForegroundColor Cyan
 Write-Host "目标: $OC`n"
 
 # [1/4] 创建目标目录
@@ -80,4 +81,4 @@ Write-Host "`n===== 部署完成 =====" -ForegroundColor Cyan
 Write-Host "  成功: $($deployed.Count) | 跳过: $($skipped.Count) | 失败: $($failed.Count)"
 if ($skipped.Count -gt 0) { foreach ($s in $skipped) { Write-Host "    跳过: $s" -ForegroundColor Yellow } }
 if ($failed.Count -gt 0) { foreach ($f in $failed) { Write-Host "    失败: $f" -ForegroundColor Red } }
-Write-Host "`n确保 opencode.json 中 plugin 数组包含 `"memories`"，然后重启 opencode。" -ForegroundColor Cyan
+Write-Host "`n~/.config/opencode/plugins/ 目录下插件自动发现，无需在 opencode.json plugin 列表中声明。" -ForegroundColor Cyan
