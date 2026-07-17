@@ -34,6 +34,10 @@ const LAST_ANALYSIS = path.join(MEMORIES_DIR, "last-analysis.json");
 const ANALYSIS_THRESHOLD = 20; // 累积 N 条事件后触发分析
 const MAX_EVENTS_FOR_ANALYSIS = 200;
 const MAX_LOG_SIZE = 1 * 1024 * 1024; // 日志轮转阈值：1MB
+const ASSERTION_FLAG = path.join(MEMORIES_DIR, ".assertion-flag.json"); // B：断言检测信号文件
+
+// B：断言检测模式 — 匹配 LLM 凭记忆下的未验证结论
+const ASSERTION_RE = /(?:不支持|做不到|只有\s*\d+\s*种|(?<!\S)(?:没有|缺少)\s+\S+|不存在|无法\s+\S+|远[比低高]\S+|过于\S+)/;
 
 // ============================================================
 // 日志轮转：超过阈值时保留最近一段，其余丢弃
@@ -493,16 +497,26 @@ export const MemoriesPlugin = async (ctx?: { project?: { directory?: string } })
 
 **元知识记录**：当用户说"记住"、"记下来"、"存到记忆"时，判断信息层级后写入对应的 blocks/ 目录。
 
-文件元数据行（必须首行）：`<!-- type: knowledge --><!-- status: auto --><!-- description: 一句话摘要 -->`
+文件元数据行（必须首行）：\`<!-- type: knowledge --><!-- status: auto --><!-- description: 一句话摘要 -->\`
 正文 ≤ 15 行，结构：事实 → 原则 → 反例 → 结论。反例优先用 ❌/✅ 前后对比。写完自查是否可再压缩 30%。
 
 写入层级：
-- 全局 → `~/.config/opencode/memories/blocks/`
-- 个人项目级 → `~/.config/opencode/project/<hash>/memories/blocks/`
-- 共享项目级 → 项目 `.opencode/memories/blocks/`
+- 全局 → \`~/.config/opencode/memories/blocks/\`
+- 个人项目级 → \`~/.config/opencode/project/<hash>/memories/blocks/\`
+- 共享项目级 → 项目 \`.opencode/memories/blocks/\`
 写入后告知用户。
 
 **习惯确认**：本章节若出现"发现新习惯，待确认"标题，你必须先用 question 工具逐条确认（含层级），确认完成后才能继续用户任务。\n`);
+
+      // B：断言检测 — 读取上一轮的信号文件，注入跨轮提醒
+      try {
+        if (fs.existsSync(ASSERTION_FLAG)) {
+          const flag = JSON.parse(fs.readFileSync(ASSERTION_FLAG, "utf-8"));
+          output.system.push(`\n## ⚠️ 记忆管家：上一轮存在未验证的断言\n你在上一轮回复中可能输出了凭记忆下的未经验证的结论（如「${(flag as any).snippet || "…"}」）。\n在本次会话中，遇到涉及工具/API 能力判断的结论时，请先联网查证再下结论。\n`);
+          fs.unlinkSync(ASSERTION_FLAG); // 提醒后清除信号
+          debug("B: 注入断言提醒并清除信号");
+        }
+      } catch { /* 静默 */ }
 
       const memoryPaths = getMemoryPaths(projectDir);
 
@@ -606,6 +620,25 @@ export const MemoriesPlugin = async (ctx?: { project?: { directory?: string } })
       // 记录所有消息更新
       if (event.type === "message.updated") {
         logEvent(event);
+
+        // B：断言检测 — 扫描 assistant 输出中的未验证结论
+        try {
+          const props = event.properties as Record<string, unknown> | undefined;
+          if (props?.role === "assistant" && typeof props?.content === "string") {
+            const content = props.content as string;
+            if (ASSERTION_RE.test(content)) {
+              const snippet = content.slice(
+                Math.max(0, content.search(ASSERTION_RE) - 40),
+                content.search(ASSERTION_RE) + 80
+              );
+              fs.writeFileSync(ASSERTION_FLAG, JSON.stringify({
+                ts: new Date().toISOString(),
+                snippet: snippet.trim(),
+              }), "utf-8");
+              debug(`B: 断言检测命中 — ${snippet.trim().slice(0, 80)}`);
+            }
+          }
+        } catch { /* 静默 */ }
       }
 
       // 记录文件编辑事件（如果 opencode 暴露了这些事件）
