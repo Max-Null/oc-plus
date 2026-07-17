@@ -264,30 +264,34 @@ function getNewEvents(): string[] {
   return newLines.slice(-MAX_EVENTS_FOR_ANALYSIS);
 }
 
-function getApiConfig(): { apiKey: string; baseURL: string; model: string } | null {
+async function getApiConfig(): Promise<{ apiKey: string; baseURL: string; model: string } | null> {
   const configPath = path.join(OC_CONFIG, "opencode.json");
-  try {
-    const raw = fs.readFileSync(configPath, "utf-8");
-    const config = JSON.parse(raw);
-    // 去掉 provider: 前缀，API 只接受纯 model 名
-    let model = (config.model || "my-deepseek:deepseek-v4-flash").includes(":")
-      ? (config.model || "my-deepseek:deepseek-v4-flash").split(":")[1]
-      : config.model;
-    // 分析任务用 flash 更经济，若非 flash 则替换
-    if (!model.includes("flash")) model = "deepseek-v4-flash";
-    const providers = config.provider || {};
-    for (const [, provider] of Object.entries(providers)) {
-      const p = provider as Record<string, unknown>;
-      const opts = p.options as Record<string, unknown> | undefined;
-      if (opts?.apiKey && opts?.baseURL) {
-        return {
-          apiKey: opts.apiKey as string,
-          baseURL: (opts.baseURL as string).replace(/\/+$/, ""),
-          model,
-        };
+  // 读配置失败时等待 200ms 后重试一次，两次都失败才返回 null
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const raw = fs.readFileSync(configPath, "utf-8");
+      const config = JSON.parse(raw);
+      // 去掉 provider: 前缀，API 只接受纯 model 名
+      let model = (config.model || "my-deepseek:deepseek-v4-flash").includes(":")
+        ? (config.model || "my-deepseek:deepseek-v4-flash").split(":")[1]
+        : config.model;
+      // 分析任务用 flash 更经济，若非 flash 则替换
+      if (!model.includes("flash")) model = "deepseek-v4-flash";
+      const providers = config.provider || {};
+      for (const [, provider] of Object.entries(providers)) {
+        const p = provider as Record<string, unknown>;
+        const opts = p.options as Record<string, unknown> | undefined;
+        if (opts?.apiKey && opts?.baseURL) {
+          return {
+            apiKey: opts.apiKey as string,
+            baseURL: (opts.baseURL as string).replace(/\/+$/, ""),
+            model,
+          };
+        }
       }
-    }
-  } catch { /* */ }
+    } catch { /* 首次失败后重试 */ }
+    if (attempt === 0) await new Promise(r => setTimeout(r, 200));
+  }
   return null;
 }
 
@@ -298,7 +302,7 @@ function getApiConfig(): { apiKey: string; baseURL: string; model: string } | nu
  * LLM 自主决定发现什么类型的习惯、以什么格式存储。
  */
 async function analyzeAndUpdate(eventLines: string[], memoryPaths: string[]): Promise<string | null> {
-  const config = getApiConfig();
+  const config = await getApiConfig();
   if (!config) {
     debug("MEMORY: 无法获取 API 配置，跳过分析");
     return null;
@@ -369,7 +373,6 @@ async function analyzeAndUpdate(eventLines: string[], memoryPaths: string[]): Pr
         ],
         temperature: 0.3,
         max_tokens: 4000,
-        // 分析模式不需要推理链，显式关闭减少 token
         thinking: { type: "disabled" },
       }),
       signal: controller.signal,
