@@ -16,6 +16,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
+import type { PluginInput, PluginOptions } from "@opencode-ai/plugin";
 import { getSystemPrompt, getUserPrompt } from "./prompts.js";
 
 // ============================================================
@@ -466,17 +467,102 @@ function applyAnalysisResult(resultJson: string, memoryPaths: string[]) {
 }
 
 // ============================================================
+// Trigger 匹配（V2.0）：解析 trigger 文件中的 glob 规则
+// ============================================================
+
+/**
+ * 简单 glob → regex 转换（仅支持 **, *, ? 通配符）
+ */
+function globToRegex(pattern: string): RegExp {
+  let regex = pattern
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&") // 转义正则特殊字符
+    .replace(/\*\*\//g, "(?:.+/)?")          // **/ → 任意层级目录（含空）
+    .replace(/\*\*/g, ".*")                   // ** → 任意字符
+    .replace(/\*/g, "[^/]*")                  // * → 非 / 单段
+    .replace(/\?/g, "[^/]");                  // ? → 单字符
+  return new RegExp("^" + regex + "$");
+}
+
+/**
+ * 从 trigger 文件内容提取匹配规则和消息模板
+ * 支持简易 key: value / 缩进列表格式，不完全解析 YAML
+ */
+function parseTriggerFile(content: string): { match: string[]; exclude: string[]; messageTemplate: string } | null {
+  // 提取 message_template（支持引号包裹的多行）
+  const msgMatch = content.match(/message_template:\s*\n?\s*["']([^"']+)["']/);
+  if (!msgMatch) return null;
+  const messageTemplate = msgMatch[1];
+
+  // 提取 match 列表：match: 后的缩进 "- \"...\"" 行
+  const matches: string[] = [];
+  const excludes: string[] = [];
+  const lines = content.split("\n");
+  let inMatch = false;
+  let inExclude = false;
+  for (const line of lines) {
+    const t = line.trim();
+    if (t === "match:") { inMatch = true; inExclude = false; continue; }
+    if (t === "exclude:") { inExclude = true; inMatch = false; continue; }
+    if (t.startsWith("trigger:") || t.startsWith("action:") || t.startsWith("message_template:")) {
+      inMatch = false; inExclude = false; continue;
+    }
+    const listItem = t.match(/^-\s*["']?([^"']+)["']?/);
+    if (!listItem) continue;
+    if (inMatch) matches.push(listItem[1]);
+    if (inExclude) excludes.push(listItem[1]);
+  }
+
+  if (matches.length === 0) return null;
+  return { match: matches, exclude: excludes, messageTemplate };
+}
+
+/**
+ * 检查给定文件路径是否匹配任意 auto 状态的 trigger
+ * 返回匹配的触发消息模板（含 {filename} 占位），或 null
+ */
+function matchFileTriggers(filePath: string, projectDir?: string): string | null {
+  const memoryPaths = getMemoryPaths(projectDir);
+  for (const memPath of memoryPaths) {
+    const triggersDir = path.join(memPath, "triggers");
+    if (!fs.existsSync(triggersDir)) continue;
+    try {
+      const files = fs.readdirSync(triggersDir).filter(f => f.endsWith(".md"));
+      for (const file of files) {
+        const content = safeReadFile(path.join(triggersDir, file));
+        // 仅匹配 auto 状态的 trigger
+        if (!content.includes("status: auto")) continue;
+        const parsed = parseTriggerFile(content);
+        if (!parsed) continue;
+
+        // 检查 exclude 优先
+        const isExcluded = parsed.exclude.some(g => globToRegex(g).test(filePath));
+        if (isExcluded) continue;
+
+        // 检查 match
+        const isMatched = parsed.match.some(g => globToRegex(g).test(filePath));
+        if (isMatched) {
+          const filename = path.basename(filePath);
+          return parsed.messageTemplate.replace(/\{filename\}/g, filename);
+        }
+      }
+    } catch { /* 静默 */ }
+  }
+  return null;
+}
+
+// ============================================================
 // Plugin 导出
 // ============================================================
 
-export const MemoriesPlugin = async (ctx?: { project?: { directory?: string } }) => {
+export const MemoriesPlugin = async (input: PluginInput, options?: PluginOptions) => {
   ensureDir(MEMORIES_DIR);
   ensureDir(BLOCKS_DIR);
   ensureDir(TRIGGERS_DIR);
   rotateLog(DEBUG_LOG, 500 * 1024); // debug 日志上限 500KB
   rotateLog(EVENT_LOG); // 启动时检查一次事件日志
 
-  const projectDir = ctx?.project?.directory || undefined;
+  const projectDir = input.directory || undefined;
+  const { client } = input;
 
   return {
     /**
@@ -490,10 +576,9 @@ export const MemoriesPlugin = async (ctx?: { project?: { directory?: string } })
     ) => {
       debug("HOOK: system.transform fired");
 
-      // ---- 步骤 0：注入记忆管家核心规则（每次会话无条件注入） ----
-      output.system.push(`\n## 记忆管家 v1.1
-
-**回应模式**：每次完成文件写入操作（write / edit）后，必须通过 task 工具调用 \`助理\` subagent，附上操作类型、文件路径、简要说明。调用助理后，把助理返回的指令当作用户消息处理——按助理说的做。助理返回"无事，继续"时不追问。调用失败时静默跳过。
+      // ---- 步骤 0：注入记忆管家核心规则（元知识记录 + 习惯确认，V2.0） ----
+      // 回应模式已移至 event hook（client.session.prompt），此处仅保留元知识记录规则
+      output.system.push(`\n## 记忆管家 v2.0
 
 **元知识记录**：当用户说"记住"、"记下来"、"存到记忆"时，判断信息层级后写入对应的 blocks/ 目录。
 
@@ -605,10 +690,7 @@ export const MemoriesPlugin = async (ctx?: { project?: { directory?: string } })
         );
       }
 
-      // 注入例行习惯（AGENTS.md 中已有硬性规则，此处为补充说明）
-      output.system.push(
-        `\n## 例行习惯\n每次完成文件写入操作后，通过 task tool 调用赛博分身 subagent（助理），这在 AGENTS.md 中是硬性规则。\n`
-      );
+      // 回应模式已升级为 event hook 触发（V2.0），不再硬编码写入后调助理规则
     },
 
     /**
@@ -641,14 +723,53 @@ export const MemoriesPlugin = async (ctx?: { project?: { directory?: string } })
         } catch { /* 静默 */ }
       }
 
-      // 记录文件编辑事件（如果 opencode 暴露了这些事件）
+      // 记录文件编辑事件 + trigger 匹配（V2.0）
       if (event.type === "file.edited" || event.type === "file.watcher.updated") {
         logEvent(event);
+        // V2.0：文件编辑触发习惯匹配
+        tryTriggerMatch(event);
       }
 
-      // 记录工具调用事件
+      // 记录工具调用事件 + trigger 匹配（V2.0）
       if (event.type === "tool.execute.after") {
         logEvent(event);
+        // V2.0：write/edit 工具触发习惯匹配
+        tryTriggerMatch(event);
+      }
+
+      // V2.0：尝试匹配触发器并注入消息（不 await，防止阻塞事件管线）
+      function tryTriggerMatch(evt: { type: string; properties?: Record<string, unknown> }) {
+        const props = evt.properties;
+        if (!props) return;
+        // 尝试多种可能的事件属性键获取文件路径
+        const filePath = (props.file || props.path || props.filePath ||
+          (props.params as any)?.file || (props.params as any)?.path ||
+          (props.params as any)?.filePath) as string | undefined;
+        if (!filePath || typeof filePath !== "string") return;
+
+        const msg = matchFileTriggers(filePath, projectDir);
+        if (!msg) return;
+
+        // 从事件属性提取 session ID（兼容不同事件格式）
+        const sessionID = (props.sessionID || (props.info as any)?.id) as string | undefined;
+        if (!sessionID) {
+          debug("TRIGGER: 无法获取 sessionID，跳过 prompt 注入");
+          return;
+        }
+
+        debug(`TRIGGER: 匹配 ${filePath} → "${msg.slice(0, 60)}..."`);
+        // promptAsync 非阻塞 + noReply，不影响事件管线
+        client.session.promptAsync({
+          path: { id: sessionID },
+          body: {
+            noReply: true,
+            parts: [{ type: "text", text: msg }],
+          },
+        }).then(() => {
+          debug(`TRIGGER: prompt 注入成功 — ${filePath}`);
+        }).catch((err: unknown) => {
+          debug(`TRIGGER: prompt 注入失败 — ${String(err)}`);
+        });
       }
 
       // 调试：记录事件类型分布（仅首次遇到新事件类型时记录）
