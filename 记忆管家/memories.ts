@@ -16,8 +16,13 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
-import type { PluginInput, PluginOptions } from "@opencode-ai/plugin";
 import { getSystemPrompt, getUserPrompt } from "./prompts.js";
+
+// V2.0：PluginInput 最小化接口
+interface PluginInput {
+  client: any;       // OpencodeClient，仅调用 session.promptAsync()
+  directory: string; // 项目目录
+}
 
 // ============================================================
 // 路径常量
@@ -650,7 +655,7 @@ ${trigger.fullContent}
 // Plugin 导出
 // ============================================================
 
-export const MemoriesPlugin = async (input: PluginInput, options?: PluginOptions) => {
+export const MemoriesPlugin = async (input: PluginInput, _options?: Record<string, unknown>) => {
   ensureDir(MEMORIES_DIR);
   ensureDir(BLOCKS_DIR);
   ensureDir(TRIGGERS_DIR);
@@ -930,4 +935,9 @@ export const MemoriesPlugin = async (input: PluginInput, options?: PluginOptions
       }
     },
   };
+};
+
+export default {
+  id: "memories",
+  server: MemoriesPlugin,
 };
