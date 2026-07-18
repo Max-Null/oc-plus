@@ -1,6 +1,9 @@
 # OC 上下文精简方案对比
 
-> 验证日期：2026-07-18
+> 验证日期：2026-07-19 · **ACP 已安装**（`opencode plugin opencode-acp@latest --global`）— 本机 OC 内置压缩已禁用
+>
+> 安装命令：`opencode plugin opencode-acp@latest --global`
+> 安装后必须禁用 OC 内置压缩：`opencode.json` 中 `"compaction": { "auto": false }`
 
 ## 社区插件
 
