@@ -1,7 +1,7 @@
 <#-----------------------------------------------------------------------------
     脚本: deploy.ps1
-    说明: 部署 oc-plus V3.4 agent 定义、命令和记忆管家 Plugin 到 opencode 配置目录
-    版本: V3.6 | 2026-07-17
+     说明: 部署 oc-plus V3.0 agent 定义、命令和分形 Plugin 到 opencode 配置目录
+     版本: V3.0 | 2026-07-19
    编码: UTF-8 with BOM
 ------------------------------------------------------------------------------#>
 param()
@@ -34,7 +34,7 @@ $deployed = @()
 $skipped = @()
 $failed = @()
 
-Write-Host "===== oc-plus V3.4 部署 =====" -ForegroundColor Cyan
+Write-Host "===== oc-plus V3.0 部署 =====" -ForegroundColor Cyan
 Write-Host "目标: $OC`n"
 
 # [1/4] 创建目标目录
