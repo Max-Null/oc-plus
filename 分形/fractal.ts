@@ -1,5 +1,10 @@
 /**
- * 分形 Plugin for OpenCode — v2.1
+ * 分形 Plugin for OpenCode — v3.1
+ *
+ * 四层触发线 Guardian Agent：
+ * - 触发线 1：文件写入匹配 trigger（glob→LLM→prompt）
+ * - 触发线 2：连续无进展循环（滑动窗口→模板注入）
+ * - 触发线 4：主动联网查证（断言检测→分级计数器→system.transform 注入）
  *
  * 三层记忆架构：
  * - 全局：~/.config/opencode/memories/
@@ -7,8 +12,8 @@
  * - 共享项目级：<项目>/.opencode/memories/
  *
  * 核心功能：
- * 1. system.transform：注入 blocks + triggers 到 system prompt
- * 2. event：记录用户操作到 events.log
+ * 1. system.transform：注入 blocks + triggers + 联网查证规则到 system prompt
+ * 2. event：记录事件 + 断言检测 + websearch 追踪 + trigger 匹配
  * 3. 分析触发：新会话启动时检查增量，调用 LLM 自主学习用户习惯
  */
 
@@ -41,9 +46,16 @@ const ANALYSIS_THRESHOLD = 20; // 累积 N 条事件后触发分析
 const MAX_EVENTS_FOR_ANALYSIS = 200;
 const MAX_LOG_SIZE = 1 * 1024 * 1024; // 日志轮转阈值：1MB
 const ASSERTION_FLAG = path.join(MEMORIES_DIR, ".assertion-flag.json"); // B：断言检测信号文件
+const ASSERTION_COUNTER = path.join(MEMORIES_DIR, ".assertion-counter.json"); // 触发线 4：分级计数器
 
 // B：断言检测模式 — 匹配 LLM 凭记忆下的未验证结论
 const ASSERTION_RE = /(?:不支持|做不到|只有\s*\d+\s*种|(?<!\S)(?:没有|缺少)\s+\S+|不存在|无法\s+\S+|远[比低高]\S+|过于\S+)/;
+
+// 触发线 4：联网工具名检测（包含 websearch / webfetch 等）
+const WEBSEARCH_TOOLS = /websearch|web_search|webfetch/;
+
+// 触发线 4：计数器衰减阈值 — 连续 N 轮无断言后自动降级
+const COUNTER_DECAY_TURNS = 3;
 
 // ============================================================
 // 日志轮转：超过阈值时保留最近一段，其余丢弃
@@ -652,6 +664,97 @@ ${trigger.fullContent}
 }
 
 // ============================================================
+// 触发线 4：断言计数器（跨轮持久，分级升级）
+// ============================================================
+
+interface AssertionState {
+  count: number;         // 累计断言（未查证）次数
+  lastSnippet: string;   // 最近一次检测到的断言片段
+  lastSessionId: string;
+  turnsSinceLastAssert: number; // 连续无断言轮数（用于衰减）
+  updatedAt: string;
+}
+
+function readCounter(): AssertionState {
+  try {
+    if (fs.existsSync(ASSERTION_COUNTER)) {
+      const raw = JSON.parse(fs.readFileSync(ASSERTION_COUNTER, "utf-8"));
+      // 类型消毒：文件可能因磁盘错误损坏，count 非数字时安全降级为 0
+      return {
+        count: Number(raw.count) || 0,
+        lastSnippet: String(raw.lastSnippet || ""),
+        lastSessionId: String(raw.lastSessionId || ""),
+        turnsSinceLastAssert: Number(raw.turnsSinceLastAssert) || 0,
+        updatedAt: String(raw.updatedAt || ""),
+      };
+    }
+  } catch { /* 忽略解析错误 */ }
+  return { count: 0, lastSnippet: "", lastSessionId: "", turnsSinceLastAssert: 0, updatedAt: "" };
+}
+
+function saveCounter(state: AssertionState) {
+  try {
+    state.updatedAt = new Date().toISOString();
+    fs.writeFileSync(ASSERTION_COUNTER, JSON.stringify(state, null, 2), "utf-8");
+  } catch { /* 静默 */ }
+}
+
+/**
+ * 递增计数器：有断言 + 本轮未联网查证
+ */
+function incrementCounter(sessionId: string, snippet: string) {
+  const c = readCounter();
+  // 跨会话重置
+  if (c.lastSessionId && c.lastSessionId !== sessionId) {
+    c.count = 0;
+    c.turnsSinceLastAssert = 0;
+  }
+  c.count++;
+  c.lastSnippet = snippet;
+  c.lastSessionId = sessionId;
+  c.turnsSinceLastAssert = 0;
+  saveCounter(c);
+  debug(`触发线4: 计数器递增 → count=${c.count} snippet="${snippet.slice(0, 50)}"`);
+}
+
+/**
+ * 重置计数器：有断言 + 本轮已联网查证 → 本轮行为正确
+ */
+function resetCounter(sessionId: string) {
+  const c = readCounter();
+  if (c.count > 0) {
+    debug(`触发线4: 计数器重置 → count=${c.count}→0（本轮已联网查证）`);
+  }
+  c.count = 0;
+  c.lastSnippet = "";
+  c.lastSessionId = sessionId;
+  c.turnsSinceLastAssert = 0;
+  saveCounter(c);
+}
+
+/**
+ * 衰减计数器：本轮无断言 → 缓慢降级
+ */
+function decayCounter(sessionId: string) {
+  const c = readCounter();
+  if (c.lastSessionId && c.lastSessionId !== sessionId) {
+    c.count = 0;
+    c.turnsSinceLastAssert = 0;
+    saveCounter(c);
+    return;
+  }
+  c.turnsSinceLastAssert++;
+  if (c.count > 0 && c.turnsSinceLastAssert >= COUNTER_DECAY_TURNS) {
+    c.count = Math.max(0, c.count - 1);
+    c.turnsSinceLastAssert = 0;
+    debug(`触发线4: 计数器衰减 → count=${c.count}`);
+    saveCounter(c);
+  }
+  // count === 0 时无需持久化衰减计数，不写磁盘（减少 IO）
+  // 重启后 count 从 0 开始是正确的默认状态
+}
+
+// ============================================================
 // Plugin 导出
 // ============================================================
 
@@ -664,6 +767,12 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
 
   const projectDir = input.directory || undefined;
   const { client } = input;
+
+  // 触发线 4：本轮是否已调用过联网查证工具
+  let websearchCalledThisTurn = false;
+
+  // 触发线 4：本轮是否已检测到断言（避免重复计数同一轮多次 content chunk）
+  let assertionDetectedThisTurn = false;
 
   return {
     /**
@@ -710,15 +819,34 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
 
 **习惯确认**：本章节若出现"发现新习惯，待确认"标题，你必须先用 question 工具逐条确认（含层级），确认完成后才能继续用户任务。\n`);
 
-      // B：断言检测 — 读取上一轮的信号文件，注入跨轮提醒
+      // 触发线 4 + B：断言检测 — 分级注入跨轮提醒
+      const c = readCounter();
       try {
+        // 旧版信号文件：保留兼容，触发线 4 按等级覆盖
         if (fs.existsSync(ASSERTION_FLAG)) {
-          const flag = JSON.parse(fs.readFileSync(ASSERTION_FLAG, "utf-8"));
-          output.system.push(`\n## ⚠️ 分形：上一轮存在未验证的断言\n你在上一轮回复中可能输出了凭记忆下的未经验证的结论（如「${(flag as any).snippet || "…"}」）。\n在本次会话中，遇到涉及工具/API 能力判断的结论时，请先联网查证再下结论。\n`);
-          fs.unlinkSync(ASSERTION_FLAG); // 提醒后清除信号
-          debug("B: 注入断言提醒并清除信号");
+          fs.unlinkSync(ASSERTION_FLAG);
         }
       } catch { /* 静默 */ }
+
+      // 按计数器等级注入提醒
+      if (c.count === 1) {
+        output.system.push(`\n## ⚠️ 分形：请先查证再下结论（首次提醒）
+上一轮你说了「${c.lastSnippet}」但没有联网查证。
+涉及未知 API/工具/框架的能力判断时，**先调 websearch 查官方文档**，不要凭记忆猜。
+`);
+      } else if (c.count >= 2 && c.count <= 3) {
+        output.system.push(`\n## ⚠️ 分形：连续 ${c.count} 次断言未查证（强硬提醒）
+你已连续 ${c.count} 轮凭记忆下结论但不联网验证了！
+「${c.lastSnippet}」— 涉及未知 API 能力时，调用 websearch 比凭记忆猜强 10 倍。
+涉及任何 API/工具/框架前，**必须先搜索官方文档**，不要依赖训练数据记忆。
+`);
+      } else if (c.count >= 4) {
+        output.system.push(`\n## 🛑 分形：强制联网查证（已累计 ${c.count} 次）
+你已连续 ${c.count} 次断言未查证！AGENTS.md 明确禁止凭记忆输出能力判断。
+**本轮回复前，如涉及任何工具/API/框架的能力判断，你必须先调用 websearch。**
+https://websearch 就绪。先搜再说。
+`);
+      }
 
       const memoryPaths = getMemoryPaths(projectDir);
 
@@ -807,6 +935,20 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
         );
       }
 
+      // 触发线 4：强化版联网查证规则 — 注入到 system prompt 最末尾（最高 recency weight）
+      output.system.push(`\n## 🔍 联网查证规则（分形 Guardian）
+任何涉及以下类型的结论，**必须先调 websearch 查官方文档**，禁止凭训练数据记忆回答：
+- "XX 不支持 / 做不到 / 只有 N 种方法"
+- 系统能力对比（如"A 比 B 差"）
+- 穷举型列举（API 清单、配置枚举、hook 列表）
+- 从局部代码推测工具完整能力
+
+✅ 正确：遇到不确定的 API → websearch 查文档 → 基于文档回答
+❌ 错误：遇到不确定的 API → 凭记忆说"只有 3 个 hook"（实际有 16+）
+
+websearch 工具已在你的工具箱中。用不用它比你记没记对更重要。
+`);
+
       // 回应模式已升级为 event hook 触发（V2.0），不再硬编码写入后调助理规则
     },
 
@@ -820,9 +962,22 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
       if (event.type === "message.updated") {
         logEvent(event);
 
-        // B：断言检测 — 扫描 assistant 输出中的未验证结论
         try {
           const props = event.properties as Record<string, unknown> | undefined;
+          const sessionID = props?.sessionID as string | undefined;
+
+          // 触发线 4：用户新消息 → 重置本轮标志 + 衰减计数器
+          if (props?.role === "user") {
+            // 上轮有断言但本轮是新的用户消息 → 上一轮结束，检查是否需要衰减
+            if (!assertionDetectedThisTurn) {
+              decayCounter(sessionID || "");
+            }
+            websearchCalledThisTurn = false;
+            assertionDetectedThisTurn = false;
+            debug(`触发线4: 新用户消息 → 重置本轮标志`);
+          }
+
+          // 触发线 4：扫描 assistant 输出 → 分级计数而非简单标记
           if (props?.role === "assistant" && typeof props?.content === "string") {
             const content = props.content as string;
             if (ASSERTION_RE.test(content)) {
@@ -830,11 +985,24 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
                 Math.max(0, content.search(ASSERTION_RE) - 40),
                 content.search(ASSERTION_RE) + 80
               );
+
+              // 写入旧版信号文件（保留兼容）
               fs.writeFileSync(ASSERTION_FLAG, JSON.stringify({
                 ts: new Date().toISOString(),
                 snippet: snippet.trim(),
               }), "utf-8");
-              debug(`B: 断言检测命中 — ${snippet.trim().slice(0, 80)}`);
+
+              // 触发线 4：分级计数
+              if (!assertionDetectedThisTurn) {
+                assertionDetectedThisTurn = true;
+                if (websearchCalledThisTurn) {
+                  resetCounter(sessionID || "");
+                  debug(`触发线4: 断言检测命中但已联网查证 — ${snippet.trim().slice(0, 60)}`);
+                } else {
+                  incrementCounter(sessionID || "", snippet.trim());
+                  debug(`触发线4: 断言检测命中且未查证 — ${snippet.trim().slice(0, 60)}`);
+                }
+              }
             }
           }
         } catch { /* 静默 */ }
@@ -850,6 +1018,15 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
       // 记录工具调用事件 + trigger 匹配（V2.0）
       if (event.type === "tool.execute.after") {
         logEvent(event);
+
+        // 触发线 4：检测是否调用了联网查证工具
+        const toolProps = event.properties as Record<string, unknown> | undefined;
+        const toolName = toolProps?.tool as string | undefined;
+        if (toolName && WEBSEARCH_TOOLS.test(toolName)) {
+          websearchCalledThisTurn = true;
+          debug(`触发线4: 检测到联网查证 → ${toolName}`);
+        }
+
         // V2.0：write/edit 工具触发习惯匹配
         tryTriggerMatch(event);
       }
