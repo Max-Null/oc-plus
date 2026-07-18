@@ -32,7 +32,7 @@
 | 2. 连续无进展循环 | 反复修改不收敛 + 无联网 | 滑动窗口（最近 5 条 tool call）纯规则 | ✅ |
 | 3. 上下文压力 | token 用量 > 70% 模型窗口 | 阈值判断纯规则 | ⏸️ ACP 已覆盖核心需求 |
 | 4. 主动联网查证 | 凭记忆下断言 + 未联网查证 | ASSERTION_RE + websearch 追踪 + 分级计数器 | ✅ |
-| 5. 提交后知识提取 | git commit 完成后提取可记忆知识点 | tool.execute.after 检测 commit → LLM 分析 diff+message → 写入 blocks/ | 📋 |
+| 5. 提交后知识提取 | git commit 完成后提取可记忆知识点 | tool.execute.after 检测 commit → LLM 分析 diff+message → 写入 blocks/ | ✅ |
 
 ### 2.3 后续计划
 

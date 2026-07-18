@@ -5,6 +5,7 @@
  * - 触发线 1：文件写入匹配 trigger（glob→LLM→prompt）
  * - 触发线 2：连续无进展循环（滑动窗口→模板注入）
  * - 触发线 4：主动联网查证（断言检测→分级计数器→system.transform 注入）
+ * - 触发线 5：提交后知识提取（git commit 检测→LLM 分析→写入 blocks）
  *
  * 三层记忆架构：
  * - 全局：~/.config/opencode/memories/
@@ -62,6 +63,10 @@ const WEBSEARCH_TOOLS = /websearch|web_search|webfetch/;
 
 // 触发线 4：计数器衰减阈值 — 连续 N 轮无断言后自动降级
 const COUNTER_DECAY_TURNS = 3;
+
+// 触发线 5：提交后知识提取
+const COMMIT_FLAG = path.join(MEMORIES_DIR, ".commit-flag.json");
+const COMMIT_PATTERN = /git\s+commit/; // 匹配 bash 命令中包含 git commit
 
 // /fractal pause <n> 检查：某条触发线是否被暂停
 function isLinePaused(line: string): boolean {
@@ -795,6 +800,148 @@ function decayCounter(sessionId: string) {
 }
 
 // ============================================================
+// 触发线 5：提交后知识提取
+// ============================================================
+
+/**
+ * 从最近的 git commit 中提取值得记忆的知识点
+ * 通过 system.transform 在下一轮执行（不阻塞当前消息）
+ */
+async function extractCommitKnowledge(
+  _flag: { ts: string; command: string },
+  projectDir: string | undefined,
+  memoryPaths: string[],
+) {
+  debug("触发线5: 开始提取提交知识...");
+  const cwd = projectDir || ".";
+  // 跳过非 git 目录
+  if (!fs.existsSync(path.join(cwd, ".git"))) {
+    debug("触发线5: 非 git 目录，跳过");
+    return;
+  }
+
+  // 读取最新提交信息
+  let commitMsg = "";
+  let changedFiles = "";
+  try {
+    const { execSync } = await import("node:child_process");
+    commitMsg = execSync("git log -1 --format='%s%n%b'", { cwd, encoding: "utf-8", timeout: 5000 }).trim();
+    changedFiles = execSync("git diff HEAD~1 --stat", { cwd, encoding: "utf-8", timeout: 5000 }).trim();
+  } catch (err) {
+    debug(`触发线5: git 读取失败 — ${String(err)}`);
+    return;
+  }
+
+  if (!commitMsg) {
+    debug("触发线5: 无提交信息");
+    return;
+  }
+
+  // 跳过自动生成的提交（如 merge、bump 等）
+  if (/^(Merge|Bump|chore\(deps\)|\(bot\))/i.test(commitMsg.split("\n")[0])) {
+    debug(`触发线5: 跳过自动提交 — "${commitMsg.slice(0, 60)}"`);
+    return;
+  }
+
+  debug(`触发线5: 提交消息 — "${commitMsg.slice(0, 80)}"`);
+
+  // 读取已有的知识块供 LLM 参考
+  let existingKnowledge = "";
+  try {
+    for (const mp of memoryPaths) {
+      const bd = path.join(mp, "blocks");
+      if (fs.existsSync(bd)) {
+        for (const f of fs.readdirSync(bd).filter(x => x.endsWith(".md"))) {
+          existingKnowledge += `[${f}] ${safeReadFile(path.join(bd, f)).slice(0, 200)}\n`;
+        }
+      }
+    }
+  } catch { /* */ }
+
+  // 构建提取 prompt
+  const extractionPrompt = `你是知识提取器。分析以下 git commit，判断是否存在值得记录的知识点。
+
+规则：
+1. 如果提交内容只是日常编码（改 bug、加字段、调样式），返回 {"action":"skip"}
+2. 如果涉及工具/框架的踩坑经验、配置技巧、API 使用发现，提取为知识
+3. 知识标题用中文一句话摘要，正文 ≤15 行，格式：事实→原则→反例→结论
+4. 每条知识标注建议的存储层级：0=全局, 1=个人项目级, 2=共享项目级
+5. 文件名用小写英文+连字符，扩展名 .md
+
+现有知识（避免重复）：${existingKnowledge.slice(0, 2000) || "（无）"}
+
+提交信息：
+${commitMsg.slice(0, 500)}
+
+改动文件：
+${changedFiles.slice(0, 500)}
+
+回复严格 JSON，不要包含 markdown 代码块标记：
+{"action":"skip"}
+
+或
+
+{"action":"create","items":[{"file":"xxx.md","memPath":0,"content":"<!-- type: knowledge --><!-- status: pending --><!-- description: 摘要 -->\\n\\n正文 ≤15 行...","reason":"为什么值得记录"}]}`;
+
+  // 调用 LLM
+  try {
+    const config = await getApiConfig();
+    if (!config) { debug("触发线5: LLM 未配置"); return; }
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
+    const response = await fetch(`${config.baseURL}/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${config.apiKey}` },
+      body: JSON.stringify({
+        model: config.model,
+        messages: [{ role: "user", content: extractionPrompt }],
+        temperature: 0.3,
+        max_tokens: 2000,
+        thinking: { type: "disabled" },
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      debug(`触发线5: LLM 调用失败 HTTP ${response.status}`);
+      return;
+    }
+
+    const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
+    let resultJson = data.choices?.[0]?.message?.content || "";
+    if (!resultJson) { debug("触发线5: LLM 返回空"); return; }
+
+    // 容错：尝试从文本中提取 JSON
+    let parsed: { action: string; items?: Array<{ file: string; memPath: string; content: string; reason: string }> };
+    try {
+      parsed = JSON.parse(resultJson);
+    } catch {
+      const jsonMatch = resultJson.match(/\{[\s\S]*\}/);
+      if (jsonMatch) { parsed = JSON.parse(jsonMatch[0]); }
+      else { debug(`触发线5: 无法解析 LLM 返回: ${resultJson.slice(0, 200)}`); return; }
+    }
+
+    if (parsed.action === "skip") { debug("触发线5: LLM 判断无需记录"); return; }
+
+    // 写入知识文件
+    if (parsed.items) {
+      for (const item of parsed.items) {
+        const mpIdx = parseInt(item.memPath, 10);
+        const targetDir = path.join(memoryPaths[mpIdx] || MEMORIES_DIR, "blocks");
+        ensureDir(targetDir);
+        const filePath = path.join(targetDir, item.file);
+        fs.writeFileSync(filePath, item.content, "utf-8");
+        debug(`触发线5: 写入知识 → ${filePath} (${item.reason})`);
+      }
+    }
+  } catch (err) {
+    debug(`触发线5: LLM 调用异常 ${String(err)}`);
+  }
+}
+
+// ============================================================
 // Plugin 导出
 // ============================================================
 
@@ -813,6 +960,9 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
 
   // 触发线 4：本轮是否已检测到断言（避免重复计数同一轮多次 content chunk）
   let assertionDetectedThisTurn = false;
+
+  // 触发线 5：本轮是否检测到 git commit
+  let commitDetectedThisTurn = false;
 
   // 注入频率控制：knowledge 索引 + habits 不每轮都塞
   let turnCounter = 0;
@@ -880,6 +1030,15 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
           debug("FRACTAL: /fractal learn 标志检测到，强制触发分析");
         }
       } catch { /* 静默 */ }
+
+      // 触发线 5：提交后知识提取（COMMIT_FLAG 由 tool.execute.after 写入）
+      try {
+        if (fs.existsSync(COMMIT_FLAG)) {
+          const flag = JSON.parse(fs.readFileSync(COMMIT_FLAG, "utf-8"));
+          fs.unlinkSync(COMMIT_FLAG);
+          await extractCommitKnowledge(flag, projectDir, memoryPaths);
+        }
+      } catch (err) { debug(`触发线5: 提取失败 ${String(err)}`); }
 
       const newEvents = getNewEvents();
       // 动态阈值：首次 20 条，第 N 次 20 * 2^N 条（上限 400）
@@ -1114,6 +1273,21 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
         if (toolName && WEBSEARCH_TOOLS.test(toolName)) {
           websearchCalledThisTurn = true;
           debug(`触发线4: 检测到联网查证 → ${toolName}`);
+        }
+
+        // 触发线 5：检测 git commit（bash 命令中包含 "git commit"）
+        if (toolName === "bash") {
+          const cmd = (toolArgs as any)?.command || JSON.stringify(toolArgs);
+          if (COMMIT_PATTERN.test(cmd)) {
+            commitDetectedThisTurn = true;
+            try {
+              fs.writeFileSync(COMMIT_FLAG, JSON.stringify({
+                ts: new Date().toISOString(),
+                command: cmd.slice(0, 200),
+              }), "utf-8");
+            } catch { /* 静默 */ }
+            debug(`触发线5: 检测到 git commit → 下次 system.transform 将提取知识`);
+          }
         }
 
         // V2.0：write/edit 工具触发习惯匹配
