@@ -43,7 +43,19 @@ oc-plus/
 | `双星系统/` | 双星 primary agent + 工匠/参谋/军师 subagent + commands |
 | `记忆管家/` | memories 插件（三层记忆 + LLM 自主学习 + B：断言检测） |
 | `技能/` | mxy-commit-review 等 9 个自定义 skill |
-| `doc/知识/` | CC vs OC 对比分析 + OC Plugin API 速查表 |
+| `doc/知识/` | CC vs OC 对比 + OC Plugin API 速查 + Hooks 完整列表 + 加载机制 + 上下文插件 |
+
+## 修改 OC 前先查本地知识库
+
+涉及 OC 插件/agent/hook 的修改时，**先 `read` `doc/知识/` 下的文档**，再联网查：
+
+| 先查本地（确定性的） | 文档路径 |
+|------|------|
+| OC hooks 有哪些、能改什么 | `doc/知识/OC-Plugin-Hooks.md` |
+| 插件为什么加载不了 | `doc/知识/OC-Plugin-Loading.md` |
+| 上下文精简有什么现成方案 | `doc/知识/OC-Context-Plugins.md` |
+
+本地文档是踩坑后沉淀的——不要每次遇到 OC 问题都从零联网查。
 
 ## 部署
 
