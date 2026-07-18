@@ -817,7 +817,10 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
   // 注入频率控制：knowledge 索引 + habits 不每轮都塞
   let turnCounter = 0;
   const NUDGE_INTERVAL = 5; // 每 N 轮注入一次 knowledge/habits 索引
-  const MAX_KNOWLEDGE_INJECT = 5; // 记忆反馈：单轮最多注入 N 条（按 mtime 排序，最近活跃的优先）
+  const MAX_KNOWLEDGE_INJECT = 5; // 记忆反馈：单轮最多注入 N 条
+
+  // 动态阈值：分析次数递增时阈值翻倍，避免长会话频繁触发 LLM 分析
+  let analysisCount = 0;
 
   return {
     /**
@@ -874,9 +877,11 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
       } catch { /* 静默 */ }
 
       const newEvents = getNewEvents();
-      debug(`FRACTAL: 新事件数=${newEvents.length}，阈值=${ANALYSIS_THRESHOLD}`);
+      // 动态阈值：首次 20 条，第 N 次 20 * 2^N 条（上限 400）
+      const dynamicThreshold = Math.min(ANALYSIS_THRESHOLD * Math.pow(2, analysisCount), 400);
+      debug(`FRACTAL: 新事件数=${newEvents.length}，阈值=${dynamicThreshold}（第 ${analysisCount + 1} 次分析）`);
 
-      if (forceLearn || newEvents.length >= ANALYSIS_THRESHOLD) {
+      if (forceLearn || newEvents.length >= dynamicThreshold) {
         debug("FRACTAL: 触发 LLM 自主学习分析...");
         const result = await analyzeAndUpdate(newEvents, memoryPaths);
         if (result && result !== "NO_NEW_HABITS") {
@@ -888,6 +893,8 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
         const lastEvent = newEvents[newEvents.length - 1];
         const lastTs = JSON.parse(lastEvent).ts;
         saveLastAnalysis(lastTs, newEvents.length);
+        analysisCount++;
+        debug(`FRACTAL: 分析完成，下次阈值=${Math.min(ANALYSIS_THRESHOLD * Math.pow(2, analysisCount), 400)}`);
       }
 
       // ---- 步骤 2：注入 blocks + triggers ----
