@@ -20,6 +20,7 @@ $deployments = @(
     @{ Source = ".\分形\lib\prompts.ts";   TargetDir = "$OC\plugins\lib" },
     @{ Source = ".\分形\scripts\memories-cli.mjs"; TargetDir = "$OC\scripts" },
     @{ Source = ".\分形\scripts\test-analyze.mjs"; TargetDir = "$OC\scripts" },
+    @{ Source = ".\分形\scripts\fractal-cli.mjs"; TargetDir = "$OC\scripts" },
     @{ Source = ".\agents-priority.ts";           TargetDir = "$OC\plugins" }
 )
 

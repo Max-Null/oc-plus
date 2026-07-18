@@ -44,6 +44,8 @@ const TRIGGERS_DIR = path.join(MEMORIES_DIR, "triggers");
 const EVENT_LOG = path.join(MEMORIES_DIR, "events.log");
 const DEBUG_LOG = path.join(MEMORIES_DIR, "debug.log");
 const LAST_ANALYSIS = path.join(MEMORIES_DIR, "last-analysis.json");
+const PAUSE_PREFIX = path.join(MEMORIES_DIR, ".fractal-pause-"); // /fractal pause <n> 标志文件前缀
+const LEARN_FLAG = path.join(MEMORIES_DIR, ".fractal-learn-flag.json"); // /fractal learn 触发标志
 
 const ANALYSIS_THRESHOLD = 20; // 累积 N 条事件后触发分析
 const MAX_EVENTS_FOR_ANALYSIS = 200;
@@ -59,6 +61,11 @@ const WEBSEARCH_TOOLS = /websearch|web_search|webfetch/;
 
 // 触发线 4：计数器衰减阈值 — 连续 N 轮无断言后自动降级
 const COUNTER_DECAY_TURNS = 3;
+
+// /fractal pause <n> 检查：某条触发线是否被暂停
+function isLinePaused(line: string): boolean {
+  try { return fs.existsSync(PAUSE_PREFIX + line + ".json"); } catch { return false; }
+}
 
 // ============================================================
 // 日志轮转：超过阈值时保留最近一段，其余丢弃
@@ -831,9 +838,10 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
         }
       } catch { /* 静默 */ }
 
-      // 按计数器等级注入提醒
-      if (c.count === 1) {
-        output.system.push(`\n## ⚠️ 分形：请先查证再下结论（首次提醒）
+      // 按计数器等级注入提醒（检查暂停标志）
+      if (!isLinePaused("4")) {
+        if (c.count === 1) {
+          output.system.push(`\n## ⚠️ 分形：请先查证再下结论（首次提醒）
 上一轮你说了「${c.lastSnippet}」但没有联网查证。
 涉及未知 API/工具/框架的能力判断时，**先调 websearch 查官方文档**，不要凭记忆猜。
 `);
@@ -850,14 +858,25 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
 https://websearch 就绪。先搜再说。
 `);
       }
+      } // isLinePaused("4") 检查结束
 
       const memoryPaths = getMemoryPaths(projectDir);
 
       // ---- 步骤 1：分析模式 ----
+      // 检查 /fractal learn 标志：强制触发分析（忽略阈值）
+      let forceLearn = false;
+      try {
+        if (fs.existsSync(LEARN_FLAG)) {
+          forceLearn = true;
+          fs.unlinkSync(LEARN_FLAG); // 一次性标志，触发后清除
+          debug("FRACTAL: /fractal learn 标志检测到，强制触发分析");
+        }
+      } catch { /* 静默 */ }
+
       const newEvents = getNewEvents();
       debug(`FRACTAL: 新事件数=${newEvents.length}，阈值=${ANALYSIS_THRESHOLD}`);
 
-      if (newEvents.length >= ANALYSIS_THRESHOLD) {
+      if (forceLearn || newEvents.length >= ANALYSIS_THRESHOLD) {
         debug("FRACTAL: 触发 LLM 自主学习分析...");
         const result = await analyzeAndUpdate(newEvents, memoryPaths);
         if (result && result !== "NO_NEW_HABITS") {
