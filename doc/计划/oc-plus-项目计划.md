@@ -38,7 +38,7 @@
 
 | 阶段 | 内容 |
 |------|------|
-| V3.1（短期） | **[借鉴 ACP 四项改进](#24-acp-借鉴改进清单)**；Guardian 动态阈值；记忆反馈循环（pursuit/dismissal）；ACP 保护规则 |
+| V3.1（短期） | ✅ ACP 四项借鉴改进全部完成；Guardian 动态阈值 ✅；记忆反馈循环 ✅；ACP 保护规则 ✅ |
 | V3.2（中期） | 触发线 5：提交后知识提取；多触发线协同避免消息轰炸；跨会话学习 |
 
 ### 2.4 ACP 借鉴改进清单
@@ -47,9 +47,9 @@
 
 | # | 改进项 | 说明 | 优先级 |
 |---|--------|------|--------|
-| 1 | **双通道注入** | 新增 `chat.message.transform` hook，同轮内往消息列表注入警告（触发线 2 循环检测等），比跨轮 system prompt 提醒更即时 | 🔴 高 |
-| 2 | **注入频率控制** | 长会话中 knowledge 索引/习惯列表不必每轮都塞，学习 ACP 的 `nudgeFrequency` 做间隔注入 | 🟡 中 |
-| 3 | **可定制 prompt 模板** | 注入文案从硬编码抽成外部文件（`~/.config/opencode/fractal-prompts/`），用户可直接编辑 | 🟡 中 |
+| 1 | **双通道注入** | 新增 `chat.message` hook，同轮内往消息列表注入警告（触发线 2 循环检测等），比跨轮 system prompt 提醒更即时 | ✅ |
+| 2 | **注入频率控制** | 长会话中 knowledge 索引/习惯列表不必每轮都塞，学习 ACP 的 `nudgeFrequency` 做间隔注入 | ✅ |
+| 3 | **可定制 prompt 模板** | 注入文案从硬编码抽成外部文件（`~/.config/opencode/fractal-prompts/`），用户可直接编辑 | ✅ |
 | 4 | **命令系统 `/fractal`** | `/fractal status`（触发线命中/窗口状态）、`/fractal pause`（暂停某类注入）、`/fractal learn`（手动触发自主学习） | ✅ |
 
 ---
