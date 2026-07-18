@@ -14,7 +14,7 @@
 |------|------|------|
 | 双星系统 | **V3.4** | ✅ skill感知 + 修改审查 + 工匠LSP + 参谋/军师顾问 |
 | agents-priority | — | ✅ AGENTS.md 中文规范前置，不被 omo-slim 淹没 |
-| 记忆管家 | V1.3.1 | ✅ 三层记忆 + 赛博分身 + CLI工具 + 语义化置信度 + LLM分析修复 |
+| 分形 | V3.0 | ✅ Guardian Agent + 三层记忆 + 自主知识记录 + B 断言检测 |
 | AGENTS.md | — | ✅ 全局行为规范 |
 | CC 规则隔离 | — | ✅ `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT=1` |
 

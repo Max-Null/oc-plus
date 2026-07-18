@@ -15,11 +15,11 @@ $deployments = @(
     @{ Source = ".\双星系统\agents\工匠.md";   TargetDir = "$OC\agents" },
     @{ Source = ".\双星系统\agents\参谋.md";   TargetDir = "$OC\agents" },
     @{ Source = ".\双星系统\agents\军师.md";   TargetDir = "$OC\agents" },
-    @{ Source = ".\记忆管家\agents\助理.md";    TargetDir = "$OC\agents" },
-    @{ Source = ".\记忆管家\memories.ts";       TargetDir = "$OC\plugins" },
-    @{ Source = ".\记忆管家\prompts.ts";       TargetDir = "$OC\plugins" },
-    @{ Source = ".\记忆管家\scripts\memories-cli.mjs"; TargetDir = "$OC\scripts" },
-    @{ Source = ".\记忆管家\scripts\test-analyze.mjs"; TargetDir = "$OC\scripts" },
+    @{ Source = ".\分形\agents\助理.md";    TargetDir = "$OC\agents" },
+    @{ Source = ".\分形\fractal.ts";       TargetDir = "$OC\plugins" },
+    @{ Source = ".\分形\prompts.ts";       TargetDir = "$OC\plugins" },
+    @{ Source = ".\分形\scripts\memories-cli.mjs"; TargetDir = "$OC\scripts" },
+    @{ Source = ".\分形\scripts\test-analyze.mjs"; TargetDir = "$OC\scripts" },
     @{ Source = ".\agents-priority.ts";           TargetDir = "$OC\plugins" }
 )
 

@@ -14,10 +14,10 @@ oc-plus/
 │   ├── agents/         Agent 定义
 │   ├── commands/       自定义命令
 │   └── archive/        历史版本归档
-├── 记忆管家/           ← 记忆系统：三层记忆 + 赛博分身 + 断言检测(B)
+├── 分形/               ← Guard系统：多场景Guardian Agent + 自主知识记录
 │   ├── agents/         助理 agent
 │   ├── scripts/        CLI 工具
-│   ├── memories.ts     插件源码
+│   ├── fractal.ts      插件源码
 │   ├── prompts.ts      LLM prompt 模板
 │   └── 设计.md
 ├── 技能/               ← 自定义 skill（mxy- 系列 9 个）
@@ -41,7 +41,7 @@ oc-plus/
 | 目录 | 说明 |
 |------|------|
 | `双星系统/` | 双星 primary agent + 工匠/参谋/军师 subagent + commands |
-| `记忆管家/` | memories 插件（三层记忆 + LLM 自主学习 + B：断言检测） |
+| `分形/` | 分形插件（三层记忆 + Guardian Agent + B 断言检测 + 自主知识记录） |
 | `技能/` | mxy-commit-review 等 9 个自定义 skill |
 | `doc/知识/` | CC vs OC 对比 + OC Plugin API 速查 + Hooks 完整列表 + 加载机制 + 上下文插件 |
 

@@ -1,5 +1,5 @@
 /**
- * 记忆管家 Plugin for OpenCode — v1.2
+ * 分形 Plugin for OpenCode — v2.1
  *
  * 三层记忆架构：
  * - 全局：~/.config/opencode/memories/
@@ -306,7 +306,7 @@ async function getApiConfig(): Promise<{ apiKey: string; baseURL: string; model:
 }
 
 /**
- * 调用 LLM 自主学习用户习惯（记忆管家分析模式）
+ * 调用 LLM 自主学习用户习惯（分形分析模式）
  *
  * 与 Phase 2 的区别：不预定义输出格式，
  * LLM 自主决定发现什么类型的习惯、以什么格式存储。
@@ -314,7 +314,7 @@ async function getApiConfig(): Promise<{ apiKey: string; baseURL: string; model:
 async function analyzeAndUpdate(eventLines: string[], memoryPaths: string[]): Promise<string | null> {
   const config = await getApiConfig();
   if (!config) {
-    debug("MEMORY: 无法获取 API 配置，跳过分析");
+    debug(`FRACTAL: 无法获取 API 配置，跳过分析`);
     return null;
   }
 
@@ -339,7 +339,7 @@ async function analyzeAndUpdate(eventLines: string[], memoryPaths: string[]): Pr
     .filter(Boolean);
 
   if (eventSummary.length === 0) {
-    debug("MEMORY: 无有效事件可分析");
+    debug("FRACTAL: 无有效事件可分析");
     return null;
   }
 
@@ -366,7 +366,7 @@ async function analyzeAndUpdate(eventLines: string[], memoryPaths: string[]): Pr
   const userPrompt = getUserPrompt(existingBlocks, existingTriggers, eventSummary.length, JSON.stringify(eventSummary, null, 2), memoryPaths);
 
   try {
-    debug(`MEMORY: 调用 LLM 分析 ${eventSummary.length} 条事件...`);
+    debug(`FRACTAL: 调用 LLM 分析 ${eventSummary.length} 条事件...`);
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s 超时，防止阻塞
     const response = await fetch(`${config.baseURL}/chat/completions`, {
@@ -395,7 +395,7 @@ async function analyzeAndUpdate(eventLines: string[], memoryPaths: string[]): Pr
       try {
         errorBody = await response.text();
       } catch { /* 读取失败忽略 */ }
-      debug(`MEMORY: LLM 调用失败 HTTP ${response.status} — ${errorBody.slice(0, 500)}`);
+      debug(`FRACTAL: LLM 调用失败 HTTP ${response.status} — ${errorBody.slice(0, 500)}`);
       return null;
     }
 
@@ -404,11 +404,11 @@ async function analyzeAndUpdate(eventLines: string[], memoryPaths: string[]): Pr
     };
     const result = data.choices?.[0]?.message?.content || null;
     if (result) {
-      debug(`MEMORY: LLM 返回 ${result.length} bytes`);
+      debug(`FRACTAL: LLM 返回 ${result.length} bytes`);
     }
     return result;
   } catch (err) {
-    debug(`MEMORY: LLM 调用异常 ${String(err)}`);
+    debug(`FRACTAL: LLM 调用异常 ${String(err)}`);
     return null;
   }
 }
@@ -436,7 +436,7 @@ function applyAnalysisResult(resultJson: string, memoryPaths: string[]) {
   }
 
   if (!parsed || !parsed.actions) {
-    debug("MEMORY: 无法解析 LLM 返回的 JSON");
+    debug("FRACTAL: 无法解析 LLM 返回的 JSON");
     return;
   }
 
@@ -445,7 +445,7 @@ function applyAnalysisResult(resultJson: string, memoryPaths: string[]) {
 
     const pathIndex = parseInt(action.memPath, 10);
     if (isNaN(pathIndex) || pathIndex >= memoryPaths.length) {
-      debug(`MEMORY: 无效的 memPath: ${action.memPath}`);
+      debug(`FRACTAL: 无效的 memPath: ${action.memPath}`);
       continue;
     }
     const basePath = memoryPaths[pathIndex];
@@ -462,13 +462,13 @@ function applyAnalysisResult(resultJson: string, memoryPaths: string[]) {
 
     try {
       fs.writeFileSync(filePath, action.content, "utf-8");
-      debug(`MEMORY: ${action.type} → ${filePath} (${action.reason})`);
+      debug(`FRACTAL: ${action.type} → ${filePath} (${action.reason})`);
     } catch (err) {
-      debug(`MEMORY: 写入失败 ${filePath}: ${String(err)}`);
+      debug(`FRACTAL: 写入失败 ${filePath}: ${String(err)}`);
     }
   }
 
-  debug(`MEMORY: 分析完成 — ${parsed.summary || "无摘要"}`);
+  debug(`FRACTAL: 分析完成 — ${parsed.summary || "无摘要"}`);
 }
 
 // ============================================================
@@ -593,7 +593,7 @@ ${trigger.fullContent}
    （不只看文件名匹配 glob，要理解操作上下文和改动性质）
 2. 如果匹配，以用户口吻生成一条提醒消息。格式：
 
-> [记忆管家] 匹配习惯「${trigger.humanDescription}」
+> [分形] 匹配习惯「${trigger.humanDescription}」
 > (glob: ${trigger.matchGlobs}) | 置信度 ${trigger.confidence}
 
 你刚生成了 ${filename}，按我的习惯，你先审查一遍。
@@ -655,7 +655,7 @@ ${trigger.fullContent}
 // Plugin 导出
 // ============================================================
 
-export const MemoriesPlugin = async (input: PluginInput, _options?: Record<string, unknown>) => {
+export const FractalPlugin = async (input: PluginInput, _options?: Record<string, unknown>) => {
   ensureDir(MEMORIES_DIR);
   ensureDir(BLOCKS_DIR);
   ensureDir(TRIGGERS_DIR);
@@ -677,9 +677,9 @@ export const MemoriesPlugin = async (input: PluginInput, _options?: Record<strin
     ) => {
       debug("HOOK: system.transform fired");
 
-      // ---- 步骤 0：注入记忆管家核心规则（元知识记录 + 习惯确认，V2.0） ----
+      // ---- 步骤 0：注入分形核心规则（元知识记录 + 习惯确认，V2.0） ----
       // 回应模式已移至 event hook（client.session.prompt），此处仅保留元知识记录规则
-      output.system.push(`\n## 记忆管家 v2.1
+      output.system.push(`\n## 分形 v2.1
 
 **元知识记录**（手动 + 自主两路）
 
@@ -714,7 +714,7 @@ export const MemoriesPlugin = async (input: PluginInput, _options?: Record<strin
       try {
         if (fs.existsSync(ASSERTION_FLAG)) {
           const flag = JSON.parse(fs.readFileSync(ASSERTION_FLAG, "utf-8"));
-          output.system.push(`\n## ⚠️ 记忆管家：上一轮存在未验证的断言\n你在上一轮回复中可能输出了凭记忆下的未经验证的结论（如「${(flag as any).snippet || "…"}」）。\n在本次会话中，遇到涉及工具/API 能力判断的结论时，请先联网查证再下结论。\n`);
+          output.system.push(`\n## ⚠️ 分形：上一轮存在未验证的断言\n你在上一轮回复中可能输出了凭记忆下的未经验证的结论（如「${(flag as any).snippet || "…"}」）。\n在本次会话中，遇到涉及工具/API 能力判断的结论时，请先联网查证再下结论。\n`);
           fs.unlinkSync(ASSERTION_FLAG); // 提醒后清除信号
           debug("B: 注入断言提醒并清除信号");
         }
@@ -724,15 +724,15 @@ export const MemoriesPlugin = async (input: PluginInput, _options?: Record<strin
 
       // ---- 步骤 1：分析模式 ----
       const newEvents = getNewEvents();
-      debug(`MEMORY: 新事件数=${newEvents.length}，阈值=${ANALYSIS_THRESHOLD}`);
+      debug(`FRACTAL: 新事件数=${newEvents.length}，阈值=${ANALYSIS_THRESHOLD}`);
 
       if (newEvents.length >= ANALYSIS_THRESHOLD) {
-        debug("MEMORY: 触发 LLM 自主学习分析...");
+        debug("FRACTAL: 触发 LLM 自主学习分析...");
         const result = await analyzeAndUpdate(newEvents, memoryPaths);
         if (result && result !== "NO_NEW_HABITS") {
           applyAnalysisResult(result, memoryPaths);
         } else {
-          debug("MEMORY: 无新习惯或 LLM 未返回有效结果");
+          debug("FRACTAL: 无新习惯或 LLM 未返回有效结果");
         }
         // 更新时间戳
         const lastEvent = newEvents[newEvents.length - 1];
@@ -787,7 +787,7 @@ export const MemoriesPlugin = async (input: PluginInput, _options?: Record<strin
       }
 
       if (triggers.length > 0) {
-        debug(`MEMORY: 注入 ${autoHabits.length} 个已确认 + ${suggestHabits.length} 个观察中 + ${knowledgeItems.length} 个元知识`);
+        debug(`FRACTAL: 注入 ${autoHabits.length} 个已确认 + ${suggestHabits.length} 个观察中 + ${knowledgeItems.length} 个元知识`);
       }
 
       // 注入 pending 确认提示
@@ -803,7 +803,7 @@ export const MemoriesPlugin = async (input: PluginInput, _options?: Record<strin
         ].join("\n");
         const firstDesc = pendingBlocks[0]?.description || pendingTriggers[0]?.human_description || "新模式";
         output.system.push(
-          `\n## ⚠️ 记忆管家发现了新习惯，必须确认后才能继续\n记忆管家自动分析了你的操作，发现了以下新模式。**这是硬性规则（见 AGENTS.md），你必须先用 question 工具逐条确认，确认完成后才能继续执行用户任务。**\n\n${pendingList}\n\n确认方式：用 question 工具，格式参考：\n\`\`\`json\n{ "questions": [{ "question": "记忆管家发现了习惯「${firstDesc}」，是否保存？", "header": "确认习惯", "options": [{"label": "自动·全局", "description": "所有项目适用"}, {"label": "自动·本项目", "description": "仅当前项目"}, {"label": "建议·全局", "description": "观察中，所有项目"}, {"label": "建议·本项目", "description": "观察中，仅本项目"}, {"label": "不保存", "description": "跳过此习惯"}] }] }\n\`\`\`\n用户确认后：\n1. 根据选项编辑 blocks/*.md 文件的 status 为 auto 或 suggest\n2. 如果用户选的层级与 LLM 建议不同，将文件移动到对应 memPath（0=全局，1=个人项目级，2=共享项目级）\n3. 用户选择跳过则删除该文件\n`
+          `\n## ⚠️ 分形发现了新习惯，必须确认后才能继续\n分形自动分析了你的操作，发现了以下新模式。**这是硬性规则（见 AGENTS.md），你必须先用 question 工具逐条确认，确认完成后才能继续执行用户任务。**\n\n${pendingList}\n\n确认方式：用 question 工具，格式参考：\n\`\`\`json\n{ "questions": [{ "question": "分形发现了习惯「${firstDesc}」，是否保存？", "header": "确认习惯", "options": [{"label": "自动·全局", "description": "所有项目适用"}, {"label": "自动·本项目", "description": "仅当前项目"}, {"label": "建议·全局", "description": "观察中，所有项目"}, {"label": "建议·本项目", "description": "观察中，仅本项目"}, {"label": "不保存", "description": "跳过此习惯"}] }] }\n\`\`\`\n用户确认后：\n1. 根据选项编辑 blocks/*.md 文件的 status 为 auto 或 suggest\n2. 如果用户选的层级与 LLM 建议不同，将文件移动到对应 memPath（0=全局，1=个人项目级，2=共享项目级）\n3. 用户选择跳过则删除该文件\n`
         );
       }
 
@@ -954,6 +954,6 @@ export const MemoriesPlugin = async (input: PluginInput, _options?: Record<strin
 };
 
 export default {
-  id: "memories",
-  server: MemoriesPlugin,
+  id: "fractal",
+  server: FractalPlugin,
 };

@@ -1,5 +1,5 @@
 /**
- * 记忆管家 — LLM 分析 prompt 模板
+ * 分形 — LLM 分析 prompt 模板
  */
 
 export function getSystemPrompt(): string {
