@@ -137,3 +137,38 @@ plugins/
 **现象**：`opencode.json` 的 `plugin` 数组中写 `"file:///C:/Users/.../plugins/xxx.ts"` 不加载  
 **根因**：OC 1.18 的 `resolvePluginTarget` 可能不处理本地 `file://` URL，或处理失败时静默跳过  
 **替代方案**：依赖自动发现（放在 `plugins/` 目录）或发布为 npm 包
+
+## ACP 集成建议
+
+分形 Guardian Agent 与 ACP（上下文精简）互补——分形负责"提醒"，ACP 负责"压缩"。以下配置建议确保两者在长会话中协作良好：
+
+### opencode.json 推荐配置
+
+```jsonc
+{
+  "plugin": [
+    "opencode-acp@latest",  // ACP 放前面，确保先于分形初始化
+    "agents-priority",
+    "oh-my-opencode-slim"
+  ],
+  "acp": {
+    // ACP 不会压缩系统 prompt（分形注入的规则和提醒始终可见）
+    "protectedTools": ["write", "edit", "read"],
+    // 分形通过 bash 执行的 CLI（/fractal、memories）不被压缩
+    "minContextLimit": 35,
+    "maxContextLimit": 60
+  }
+}
+```
+
+### 分形与 ACP 的分工
+
+| 功能 | 分形负责 | ACP 负责 |
+|------|---------|---------|
+| 上下文压缩 | ❌ | ✅ 自动压缩 + 命令 `/compact` |
+| 触发线提醒注入 | ✅ system.transform | ❌ |
+| 长会话 prompt 膨胀 | ✅ 频率控制（每 5 轮） | ✅ token 阈值压缩 |
+| 命令系统 | `/fractal` | `/compact` |
+| 保护关键输出 | ❌ | `protectedTools` |
+
+**关键原则**：分形不做压缩、ACP 不做提醒。各司其职，互补不冲突。

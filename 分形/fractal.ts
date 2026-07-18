@@ -822,6 +822,11 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
   // 动态阈值：分析次数递增时阈值翻倍，避免长会话频繁触发 LLM 分析
   let analysisCount = 0;
 
+  // 双通道注入：chat.message 同轮警告（比 system.transform 跨轮提醒更即时）
+  let pendingWarnings: string[] = [];
+  // 触发线 2：滑动窗口（最近 5 条 tool call 的文件路径）
+  const recentToolPaths: string[] = [];
+
   return {
     /**
      * 会话启动时：
@@ -993,6 +998,23 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
     },
 
     /**
+     * 双通道注入：在用户消息到达时注入警告（同轮可见，比 system.transform 更即时）
+     */
+    "chat.message": async (
+      _input: unknown,
+      output: { parts?: Array<{ type: string; text?: string; synthetic?: boolean }> }
+    ) => {
+      if (pendingWarnings.length > 0) {
+        const warningText = `\n[分形 Guardian] ${pendingWarnings.join(" | ")}\n`;
+        if (output.parts) {
+          output.parts.unshift({ type: "text", text: warningText, synthetic: true });
+        }
+        debug(`双通道注入: chat.message 注入 ${pendingWarnings.length} 条警告`);
+        pendingWarnings = []; // 一次性消费
+      }
+    },
+
+    /**
      * 监听事件：记录用户交互
      */
     event: async (input: { event: { type: string; properties?: Record<string, unknown> } }) => {
@@ -1059,9 +1081,31 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
       if (event.type === "tool.execute.after") {
         logEvent(event);
 
-        // 触发线 4：检测是否调用了联网查证工具
+        // 触发线 2：滑动窗口循环检测
         const toolProps = event.properties as Record<string, unknown> | undefined;
         const toolName = toolProps?.tool as string | undefined;
+        const toolArgs = toolProps?.args || toolProps?.input || {};
+        const filePath = (toolArgs as any)?.filePath || (toolArgs as any)?.path || (toolArgs as any)?.file || "";
+        if (filePath) {
+          recentToolPaths.push(filePath);
+          if (recentToolPaths.length > 5) recentToolPaths.shift();
+
+          // 最近 5 次 tool call 中 ≥4 次操作同一文件 → 可能的死循环
+          if (recentToolPaths.length >= 5) {
+            const counts: Record<string, number> = {};
+            for (const p of recentToolPaths) { counts[p] = (counts[p] || 0) + 1; }
+            const maxCount = Math.max(...Object.values(counts));
+            if (maxCount >= 4 && !isLinePaused("2")) {
+              const topFile = Object.entries(counts).find(([_, c]) => c === maxCount)![0];
+              pendingWarnings.push(
+                `检测到最近 5 次操作中 ${maxCount} 次针对同一文件 "${topFile.replace(HOME, "~")}"——可能陷入无进展循环，请检查并切换到新策略`
+              );
+              debug(`触发线2: 循环检测命中 — ${maxCount}/5 次操作同一文件 → 双通道注入`);
+            }
+          }
+        }
+
+        // 触发线 4：检测是否调用了联网查证工具
         if (toolName && WEBSEARCH_TOOLS.test(toolName)) {
           websearchCalledThisTurn = true;
           debug(`触发线4: 检测到联网查证 → ${toolName}`);
