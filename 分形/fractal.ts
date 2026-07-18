@@ -46,6 +46,7 @@ const DEBUG_LOG = path.join(MEMORIES_DIR, "debug.log");
 const LAST_ANALYSIS = path.join(MEMORIES_DIR, "last-analysis.json");
 const PAUSE_PREFIX = path.join(MEMORIES_DIR, ".fractal-pause-"); // /fractal pause <n> 标志文件前缀
 const LEARN_FLAG = path.join(MEMORIES_DIR, ".fractal-learn-flag.json"); // /fractal learn 触发标志
+const PROMPT_DIR = path.join(OC_CONFIG, "fractal-prompts"); // 可定制 prompt 模板目录
 
 const ANALYSIS_THRESHOLD = 20; // 累积 N 条事件后触发分析
 const MAX_EVENTS_FOR_ANALYSIS = 200;
@@ -65,6 +66,35 @@ const COUNTER_DECAY_TURNS = 3;
 // /fractal pause <n> 检查：某条触发线是否被暂停
 function isLinePaused(line: string): boolean {
   try { return fs.existsSync(PAUSE_PREFIX + line + ".json"); } catch { return false; }
+}
+
+/**
+ * 加载外部 prompt 模板文件，不存在时返回内置默认值
+ */
+function loadPrompt(filename: string, fallback: string): string {
+  try {
+    const fpath = path.join(PROMPT_DIR, filename);
+    if (fs.existsSync(fpath)) {
+      return fs.readFileSync(fpath, "utf-8").trim();
+    }
+  } catch { /* 静默 */ }
+  return fallback;
+}
+
+/**
+ * 加载分段模板并替换占位符（{{key}}）
+ * 模板用 "\n---\n" 分隔多个 section，section 从 1 开始计数
+ */
+function loadPromptSection(filename: string, section: number, vars: Record<string, string>, fallback: string): string {
+  try {
+    const raw = loadPrompt(filename, fallback);
+    const sections = raw.split("\n---\n");
+    let template = (sections[section - 1] || sections[0] || "").trim();
+    // 替换 {{key}} 占位符
+    template = template.replace(/\{\{(\w+)\}\}/g, (_, key) => vars[key] || "");
+    return template;
+  } catch { /* 静默 */ }
+  return fallback;
 }
 
 // ============================================================
@@ -805,38 +835,10 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
       const isNudgeTurn = turnCounter % NUDGE_INTERVAL === 0;
       debug(`FRACTAL: turn=${turnCounter}, nudge=${isNudgeTurn} (interval=${NUDGE_INTERVAL})`);
 
-      // ---- 步骤 0：注入分形核心规则（元知识记录 + 习惯确认，V2.0） ----
-      // 回应模式已移至 event hook（client.session.prompt），此处仅保留元知识记录规则
-      output.system.push(`\n## 分形 v2.1
-
-**元知识记录**（手动 + 自主两路）
-
-### 手动触发
-当用户说"记住"、"记下来"、"存到记忆"时，判断信息层级后写入对应 blocks/ 目录。
-
-### 自主触发（V2.1 新增）
-当你主动发现对项目有长期价值的信息时，自行判断是否写入。判断标准：
-
-**✅ 该记（status=pending）**：
-- 下次遇到同类问题还需要再查吗？（联网查到的 OC 机制、配置规范、工具限制）
-- 这个信息在项目已有文档中不存在吗？（新增的知识，不是重复）
-- 你踩过的坑以后还可能再踩吗？（插件加载格式、调试方法）
-
-**❌ 不记**：
-- 本次会话的瞬时操作细节（"刚才读了第 3 行的文件"）
-- 用户随口说的一句话（无明确"记住"意图）
-- 项目文档已经覆盖的内容
-- 空泛的通用原则（没有具体反例和场景）
-
-**写入规则**（手动 + 自主通用）：
-- 文件元数据行：\`<!-- type: knowledge --><!-- status: auto --><!-- description: 一句话摘要 -->\`
-- 正文 ≤ 15 行，结构：事实 → 原则 → 反例 → 结论
-- 反例优先用 ❌/✅ 前后对比。写完自查是否可再压缩 30%
-- 自主触发的写入 \`status\` 设为 \`pending\` 等待用户确认，不要设为 \`auto\`
-- 写入层级：全局（跨项目通用）→ \`~/.config/opencode/memories/blocks/\` / 项目级 → \`.opencode/memories/blocks/\`
-- 写入后告知用户。
-
-**习惯确认**：本章节若出现"发现新习惯，待确认"标题，你必须先用 question 工具逐条确认（含层级），确认完成后才能继续用户任务。\n`);
+      // ---- 步骤 0：注入分形核心规则（外部模板，可编辑 ~/.config/opencode/fractal-prompts/core-rules.md） ----
+      const coreRules = loadPrompt("core-rules.md",
+        `## 分形 v2.1\n**元知识记录**（手动 + 自主两路）\n…`);
+      output.system.push(`\n${coreRules}\n`);
 
       // 触发线 4 + B：断言检测 — 分级注入跨轮提醒
       const c = readCounter();
@@ -847,27 +849,15 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
         }
       } catch { /* 静默 */ }
 
-      // 按计数器等级注入提醒（检查暂停标志）
-      if (!isLinePaused("4")) {
-        if (c.count === 1) {
-          output.system.push(`\n## ⚠️ 分形：请先查证再下结论（首次提醒）
-上一轮你说了「${c.lastSnippet}」但没有联网查证。
-涉及未知 API/工具/框架的能力判断时，**先调 websearch 查官方文档**，不要凭记忆猜。
-`);
-      } else if (c.count >= 2 && c.count <= 3) {
-        output.system.push(`\n## ⚠️ 分形：连续 ${c.count} 次断言未查证（强硬提醒）
-你已连续 ${c.count} 轮凭记忆下结论但不联网验证了！
-「${c.lastSnippet}」— 涉及未知 API 能力时，调用 websearch 比凭记忆猜强 10 倍。
-涉及任何 API/工具/框架前，**必须先搜索官方文档**，不要依赖训练数据记忆。
-`);
-      } else if (c.count >= 4) {
-        output.system.push(`\n## 🛑 分形：强制联网查证（已累计 ${c.count} 次）
-你已连续 ${c.count} 次断言未查证！AGENTS.md 明确禁止凭记忆输出能力判断。
-**本轮回复前，如涉及任何工具/API/框架的能力判断，你必须先调用 websearch。**
-https://websearch 就绪。先搜再说。
-`);
+      // 按计数器等级注入提醒（检查暂停标志，外部模板 ~/.config/opencode/fractal-prompts/assertion-reminder.md）
+      if (!isLinePaused("4") && c.count > 0) {
+        const section = c.count === 1 ? 1 : (c.count <= 3 ? 2 : 3);
+        const reminder = loadPromptSection("assertion-reminder.md", section,
+          { count: String(c.count), snippet: c.lastSnippet },
+          `\n## ⚠️ 分形：请先查证再下结论\n上一轮你说了「${c.lastSnippet}」但没有联网查证。`
+        );
+        output.system.push(`\n${reminder}\n`);
       }
-      } // isLinePaused("4") 检查结束
 
       const memoryPaths = getMemoryPaths(projectDir);
 
@@ -967,19 +957,11 @@ https://websearch 就绪。先搜再说。
         );
       }
 
-      // 触发线 4：强化版联网查证规则 — 注入到 system prompt 最末尾（最高 recency weight）
-      output.system.push(`\n## 🔍 联网查证规则（分形 Guardian）
-任何涉及以下类型的结论，**必须先调 websearch 查官方文档**，禁止凭训练数据记忆回答：
-- "XX 不支持 / 做不到 / 只有 N 种方法"
-- 系统能力对比（如"A 比 B 差"）
-- 穷举型列举（API 清单、配置枚举、hook 列表）
-- 从局部代码推测工具完整能力
-
-✅ 正确：遇到不确定的 API → websearch 查文档 → 基于文档回答
-❌ 错误：遇到不确定的 API → 凭记忆说"只有 3 个 hook"（实际有 16+）
-
-websearch 工具已在你的工具箱中。用不用它比你记没记对更重要。
-`);
+      // 触发线 4：强化版联网查证规则（外部模板 ~/.config/opencode/fractal-prompts/websearch-rules.md）
+      const websearchRules = loadPrompt("websearch-rules.md",
+        `## 🔍 联网查证规则（分形 Guardian）\n任何涉及以下类型的结论，**必须先调 websearch 查官方文档**，禁止凭训练数据记忆回答：\n- "XX 不支持 / 做不到 / 只有 N 种方法"\n- 系统能力对比\n- 穷举型列举\n- 从局部代码推测工具完整能力\n\nwebsearch 工具已就绪。先搜再说。`
+      );
+      output.system.push(`\n${websearchRules}\n`);
 
       // 回应模式已升级为 event hook 触发（V2.0），不再硬编码写入后调助理规则
     },

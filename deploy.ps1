@@ -31,6 +31,13 @@ $commandTargetDir = "$OC\commands"
 # 记忆存储子目录（全局 + 项目级）
 $memoryDirs = @("$OC\memories\blocks", "$OC\memories\triggers", "$PSScriptRoot\.opencode\memories\blocks", "$PSScriptRoot\.opencode\memories\triggers")
 
+# 可定制 prompt 模板目录
+$promptTemplates = @(
+    @{ Source = ".\分形\prompts\core-rules.md";           TargetDir = "$OC\fractal-prompts" },
+    @{ Source = ".\分形\prompts\assertion-reminder.md";   TargetDir = "$OC\fractal-prompts" },
+    @{ Source = ".\分形\prompts\websearch-rules.md";      TargetDir = "$OC\fractal-prompts" }
+)
+
 $deployed = @()
 $skipped = @()
 $failed = @()
@@ -40,7 +47,7 @@ Write-Host "目标: $OC`n"
 
 # [1/4] 创建目标目录
 Write-Host "[1/4] 创建目录..." -ForegroundColor Yellow
-$requiredDirs = @("$OC\agents", "$OC\commands", "$OC\plugins", "$OC\scripts") + $memoryDirs
+$requiredDirs = @("$OC\agents", "$OC\commands", "$OC\plugins", "$OC\scripts", "$OC\fractal-prompts") + $memoryDirs
 foreach ($dir in $requiredDirs) {
     if (-not (Test-Path -LiteralPath $dir)) {
         try { New-Item -ItemType Directory -Path $dir -Force | Out-Null; Write-Host "  + $dir" }
@@ -75,6 +82,20 @@ foreach ($dir in $memoryDirs) {
         try { New-Item -ItemType Directory -Path $dir -Force | Out-Null; Write-Host "  + $dir"; $deployed += $dir }
         catch { Write-Host "  x $dir - $_" -ForegroundColor Red; $failed += $dir }
     } else { Write-Host "  . $dir" }
+}
+
+# [5/5] 可定制 prompt 模板
+Write-Host "`n[5/5] 可定制 prompt 模板..." -ForegroundColor Yellow
+foreach ($item in $promptTemplates) {
+    if (-not (Test-Path -LiteralPath $item.Source)) {
+        Write-Host "  x 源文件不存在: $($item.Source)" -ForegroundColor Red; $skipped += $item.Source; continue
+    }
+    try {
+        New-Item -ItemType Directory -Path $item.TargetDir -Force | Out-Null
+        Copy-Item -LiteralPath $item.Source -Destination $item.TargetDir -Force
+        Write-Host "  V $($item.Source)"; $deployed += $item.Source
+    }
+    catch { Write-Host "  x $($item.Source) - $_" -ForegroundColor Red; $failed += $item.Source }
 }
 
 # 摘要
