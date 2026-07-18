@@ -817,6 +817,7 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
   // 注入频率控制：knowledge 索引 + habits 不每轮都塞
   let turnCounter = 0;
   const NUDGE_INTERVAL = 5; // 每 N 轮注入一次 knowledge/habits 索引
+  const MAX_KNOWLEDGE_INJECT = 5; // 记忆反馈：单轮最多注入 N 条（按 mtime 排序，最近活跃的优先）
 
   return {
     /**
@@ -901,17 +902,34 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
       const knowledgeItems = (blocks.filter(b => b.type === "knowledge" && b.status !== "pending") as any[])
         .concat(triggers.filter(t => t.type === "knowledge" && t.status !== "pending") as any[]);
 
-      // 注入 knowledge 索引（仅 nudge turn 注入，减少提示膨胀）
-      if (isNudgeTurn && knowledgeItems.length > 0) {
-        const indexLines = knowledgeItems.map(k => {
+      // 记忆反馈：按文件 mtime 排序，最近修改的优先注入（pursuit）；
+      // 超过 MAX_KNOWLEDGE_INJECT 条的旧知识被截断（dismissal）
+      const scored: Array<{ item: any; mtime: number }> = [];
+      for (const k of knowledgeItems) {
+        const mp = memoryPaths[parseInt((k as any).memPathIndex, 10)] || MEMORIES_DIR;
+        const subDir = (k as any).human_description !== undefined ? "triggers" : "blocks";
+        const fpath = path.join(mp, subDir, (k as any).fileName);
+        try { scored.push({ item: k, mtime: fs.statSync(fpath).mtimeMs }); }
+        catch { scored.push({ item: k, mtime: 0 }); }
+      }
+      scored.sort((a, b) => b.mtime - a.mtime); // 最近修改的排前面
+      const topKnowledge = scored.slice(0, MAX_KNOWLEDGE_INJECT);
+      const trimmed = scored.length - topKnowledge.length;
+
+      // 注入 knowledge 索引（仅 nudge turn 注入，按 mtime 排序优先展示活跃知识）
+      if (isNudgeTurn && topKnowledge.length > 0) {
+        const indexLines = topKnowledge.map(({ item: k }) => {
           const desc = (k as any).human_description || k.description;
           const mp = memoryPaths[parseInt((k as any).memPathIndex, 10)] || MEMORIES_DIR;
           const subDir = (k as any).human_description !== undefined ? "triggers" : "blocks";
           const filePath = `${mp}/${subDir}/${(k as any).fileName}`.replace(HOME, "~");
           return `- **${desc}** → \`${filePath}\``;
         });
+        const truncationNote = trimmed > 0
+          ? `\n> （共 ${scored.length} 条知识，仅展示最近活跃的 ${topKnowledge.length} 条。其余用 read 工具按需读取）`
+          : "";
         output.system.push(
-          `\n## 你记录的元知识索引\n以下是你之前记录的元知识摘要。遇到相关话题时，用 read 工具读取完整内容：\n\n${indexLines.join("\n")}\n`
+          `\n## 你记录的元知识索引\n以下是你之前记录的元知识摘要。遇到相关话题时，用 read 工具读取完整内容：\n\n${indexLines.join("\n")}${truncationNote}\n`
         );
       }
 
@@ -937,7 +955,8 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
 
       if (triggers.length > 0) {
         const skipped = !isNudgeTurn ? " (间隔跳过注入)" : "";
-        debug(`FRACTAL: 注入 ${autoHabits.length} 个已确认 + ${suggestHabits.length} 个观察中 + ${knowledgeItems.length} 个元知识${skipped}`);
+        const trimInfo = trimmed > 0 ? ` 截断${trimmed}条` : "";
+        debug(`FRACTAL: 注入 ${autoHabits.length} 个已确认 + ${suggestHabits.length} 个观察中 + ${knowledgeItems.length} 个元知识→展示${topKnowledge.length}${trimInfo}${skipped}`);
       }
 
       // 注入 pending 确认提示
