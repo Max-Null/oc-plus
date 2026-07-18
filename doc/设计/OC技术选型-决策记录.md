@@ -1,6 +1,6 @@
 # OC 技术选型 — 决策记录
 
-> 2026-07-14 · 进行中
+> 2026-07-19 · 进行中
 
 ## 背景
 
@@ -30,7 +30,7 @@
 | **文档查询** | CC 内置 | context7 MCP | 实时库文档 |
 | **代码搜索** | CC 内置 | gh_grep + GitHub MCP | 双通道 |
 | **GitHub 访问** | CC 内置 | GitHub MCP（PAT） | API 直连，反爬 |
-| **记忆系统** | CC 内置 `[[双括号]]` | 记忆管家（自制） | 三层架构 + LLM 自主学习，待验证 |
+| **记忆系统** | CC 内置 `[[双括号]]` | 分形 Guardian Agent（自制） | 三层漏斗 + LLM 自主学习 + 多场景触发 |
 
 ## 自定义技能 OC 适配
 
@@ -44,19 +44,32 @@
 | `[[记忆]]` → 内联 | organize-scss | CC 记忆系统不存在 |
 | `<ide_selection>` → 通用描述 | organize-code | CC IDE 扩展特性不存在 |
 
-## 记忆管家
+## 分形 Guardian Agent
 
-CC 的记忆系统（`[[双括号引用]]`）在 OC 中由自制的「记忆管家」替代。
+CC 的记忆系统（`[[双括号引用]]`）在 OC 中由自制的「分形 Guardian Agent」替代。
 
-| 维度 | CC | OC 记忆管家 |
+| 维度 | CC | OC 分形 |
 |------|-----|-----------|
 | 记忆存储 | CC 内部管理 | 三层：全局 / 个人项目级 / 共享项目级 |
 | 习惯发现 | 手动配置 | LLM 自主学习（20 条事件触发分析） |
-| 置信度 | — | 2-3 次 observing → 4-6 次 suggest → 7+ 次 auto-execute |
-| 触发方式 | `[[引用名]]` | system prompt 注入 + 对话中 task tool 调用 |
-| 实现方式 | CC 内置 | Plugin（memories.ts）+ 赛博分身 agent（助理） |
+| 置信度 | — | LLM 语义判断（high/medium/low），非固定计数 |
+| 触发方式 | `[[引用名]]` | system prompt 注入 + event hook 多场景触发 |
+| 插件实现 | CC 内置 | Plugin（fractal.ts）+ 助理 agent 参考定义 |
+| Guardian 能力 | 无 | 三条触发线（文件匹配 / 循环检测 / 上下文压力） |
 
-**当前状态**：设计完成 → Plugin 代码已有 → memories.ts 待重构 → 首次试运行待开始
+**当前状态**：V2.0 三层漏斗 ✅ / V2.1 自主知识记录 ✅ / V3.0 Guardian 设计完成，触发线 2 待实现
+
+## 上下文精简 — ACP 选型
+
+| 维度 | CC | OC ACP |
+|------|-----|--------|
+| 压缩方式 | 四层架构（microcompact→auto→block→reactive） | 模型自主 compress 工具 + 外部执行 |
+| 触发机制 | 固定 83.5% token 阈值 | 窗口 55% 软阈值 + 自适应 nudge |
+| 短会话处理 | 同阈值，可能过度压缩 | 45% minContextLimit 延迟触发 |
+
+**选型理由**：社区验证（2.3K 周下载），活跃维护，已安装。详见 `doc/知识/OC-Context-Plugins.md`。
+
+**安装**：`opencode plugin opencode-acp@latest --global` | 需禁用 OC 内置压缩 `"compaction": { "auto": false }`
 
 ## 技能总览（31 个）
 
