@@ -784,6 +784,10 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
   // 触发线 4：本轮是否已检测到断言（避免重复计数同一轮多次 content chunk）
   let assertionDetectedThisTurn = false;
 
+  // 注入频率控制：knowledge 索引 + habits 不每轮都塞
+  let turnCounter = 0;
+  const NUDGE_INTERVAL = 5; // 每 N 轮注入一次 knowledge/habits 索引
+
   return {
     /**
      * 会话启动时：
@@ -795,6 +799,11 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
       output: { system: string[] }
     ) => {
       debug("HOOK: system.transform fired");
+
+      // 注入频率控制：递增轮数计数器
+      turnCounter++;
+      const isNudgeTurn = turnCounter % NUDGE_INTERVAL === 0;
+      debug(`FRACTAL: turn=${turnCounter}, nudge=${isNudgeTurn} (interval=${NUDGE_INTERVAL})`);
 
       // ---- 步骤 0：注入分形核心规则（元知识记录 + 习惯确认，V2.0） ----
       // 回应模式已移至 event hook（client.session.prompt），此处仅保留元知识记录规则
@@ -902,8 +911,8 @@ https://websearch 就绪。先搜再说。
       const knowledgeItems = (blocks.filter(b => b.type === "knowledge" && b.status !== "pending") as any[])
         .concat(triggers.filter(t => t.type === "knowledge" && t.status !== "pending") as any[]);
 
-      // 注入 knowledge 索引（仅 description + 路径，不在上下文堆积——需时自取）
-      if (knowledgeItems.length > 0) {
+      // 注入 knowledge 索引（仅 nudge turn 注入，减少提示膨胀）
+      if (isNudgeTurn && knowledgeItems.length > 0) {
         const indexLines = knowledgeItems.map(k => {
           const desc = (k as any).human_description || k.description;
           const mp = memoryPaths[parseInt((k as any).memPathIndex, 10)] || MEMORIES_DIR;
@@ -916,8 +925,8 @@ https://websearch 就绪。先搜再说。
         );
       }
 
-      // 注入 auto habits（已确认的习惯）
-      if (autoHabits.length > 0) {
+      // 注入 auto habits（已确认的习惯，仅 nudge turn 注入）
+      if (isNudgeTurn && autoHabits.length > 0) {
         const triggerTexts = autoHabits.map(t =>
           `**[已确认的习惯] ${t.human_description}**\n${t.content}`
         ).join("\n\n");
@@ -926,8 +935,8 @@ https://websearch 就绪。先搜再说。
         );
       }
 
-      // 注入 suggest habits（观察中的习惯）
-      if (suggestHabits.length > 0) {
+      // 注入 suggest habits（观察中的习惯，仅 nudge turn 注入）
+      if (isNudgeTurn && suggestHabits.length > 0) {
         const triggerTexts = suggestHabits.map(t =>
           `**[观察中的习惯] ${t.human_description}**\n${t.content}`
         ).join("\n\n");
@@ -937,7 +946,8 @@ https://websearch 就绪。先搜再说。
       }
 
       if (triggers.length > 0) {
-        debug(`FRACTAL: 注入 ${autoHabits.length} 个已确认 + ${suggestHabits.length} 个观察中 + ${knowledgeItems.length} 个元知识`);
+        const skipped = !isNudgeTurn ? " (间隔跳过注入)" : "";
+        debug(`FRACTAL: 注入 ${autoHabits.length} 个已确认 + ${suggestHabits.length} 个观察中 + ${knowledgeItems.length} 个元知识${skipped}`);
       }
 
       // 注入 pending 确认提示
