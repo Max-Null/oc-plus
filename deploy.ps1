@@ -1,9 +1,9 @@
 <#-----------------------------------------------------------------------------
-    脚本: deploy.ps1
-     说明: 部署 oc-plus V3.0 agent 定义、命令和分形 Plugin 到 opencode 配置目录
-     版本: V3.0 | 2026-07-19
-   编码: UTF-8 with BOM
-------------------------------------------------------------------------------#>
+     脚本: deploy.ps1
+      说明: 部署 oc-plus V3.1 agent 定义、命令和分形 Plugin 到 opencode 配置目录
+      版本: V3.1 | 2026-07-19
+    编码: UTF-8 with BOM
+ ------------------------------------------------------------------------------#>
 param()
 
 Set-Location $PSScriptRoot
@@ -17,7 +17,7 @@ $deployments = @(
     @{ Source = ".\双星系统\agents\军师.md";   TargetDir = "$OC\agents" },
     @{ Source = ".\分形\agents\助理.md";    TargetDir = "$OC\agents" },
     @{ Source = ".\分形\fractal.ts";       TargetDir = "$OC\plugins" },
-    @{ Source = ".\分形\prompts.ts";       TargetDir = "$OC\plugins" },
+    @{ Source = ".\分形\lib\prompts.ts";   TargetDir = "$OC\plugins\lib" },
     @{ Source = ".\分形\scripts\memories-cli.mjs"; TargetDir = "$OC\scripts" },
     @{ Source = ".\分形\scripts\test-analyze.mjs"; TargetDir = "$OC\scripts" },
     @{ Source = ".\agents-priority.ts";           TargetDir = "$OC\plugins" }

@@ -1,14 +1,15 @@
 # OC 插件加载机制
 
 > 来源：OC 源码 `packages/opencode/src/plugin/index.ts` + 实战踩坑
-> 验证日期：2026-07-19（OC 1.17.x）
+> 验证日期：2026-07-19（OC 1.18.3 实测）
 
-## 加载流程
+## 加载流程（OC 1.18.x）
 
 ```
 OC 启动
   ↓
 自动发现 `~/.config/opencode/plugins/*.ts`（全局）+ `.opencode/plugins/*.ts`（项目）
+  ↓ 注：Glob 模式为 {plugin,plugins}/*.{ts,js}，只扫描一级文件，子目录不扫描
   ↓
 Bun 动态 import() 每个文件
   ↓
@@ -16,6 +17,23 @@ applyPlugin() → 先试 readV1Plugin，失败则走 getLegacyPlugins
   ↓
 插件函数被调用 → 返回 Hooks → 懒加载：首次 hook 触发才调插件函数
 ```
+
+## 1.18.x 关键变化
+
+| 项目 | 1.17.x | 1.18.3 |
+|------|--------|--------|
+| 自动发现 | ✅ `Glob.scan` | ✅ 仍然有效 |
+| `file://` URL 加载 | 可能有效 | ❌ 无效，报 `Plugin export is not a function` |
+| npm 包加载 | ✅ 有效 | ✅ 有效 |
+| V1 hook 兼容 | ✅ | ✅ `system.transform`、`event`、`tool.execute.after` 均可用 |
+| 插件报错可见性 | 无 | ✅ 写入 OC 原生日志 `~/.local/share/opencode/log/opencode.log` |
+| 非插件文件处理 | ? | 目录下**每个** `.ts` 都当插件加载，非插件文件报错 |
+
+## 1.18.x 调试方法
+
+1. **OC 原生日志**：`~/.local/share/opencode/log/opencode.log`（UTC 时间戳）
+2. **搜索插件加载错误**：`grep "failed to load plugin" opencode.log`
+3. **确认插件是否被扫描**：日志中是否有 `path=file:///.../plugins/xxx.ts` 的错误或加载记录
 
 ## 插件格式（OC 1.17.x 实测）
 
@@ -94,3 +112,28 @@ export default { id: "xx", server: async (input) => { return hooks } }
 **现象**：模块 import 后等很久才看到 hook 输出  
 **原因**：插件函数在首次 hook 触发时才被调用，不是启动时立刻调用  
 **验证方法**：发一条消息 → 触发 `chat.message` → 检查 log
+
+### 坑 7：1.18.x 非插件文件被当插件加载（子目录隔离法）
+
+**现象**：`prompts.ts`（工具模块）和 `fractal.ts`（插件）放在同一目录 → `prompts.ts` 报 `Plugin export is not a function` → 可能干扰同目录其他文件加载  
+**根因**：OC 1.18 的 `Glob.scan("{plugin,plugins}/*.{ts,js}")` 只匹配一级文件，但每个匹配到的 `.ts` 文件都会被当作插件处理  
+**修复**：非插件模块移到子目录（如 `plugins/lib/prompts.ts`），Glob 的 `*` 不匹配子目录，OC 不会扫描。插件源码中的 import 改为 `./lib/prompts.js`
+
+```
+# ❌ 旧结构（prompts.ts 被 OC 当插件加载报错）
+plugins/
+├── fractal.ts       (import "./prompts.js")
+└── prompts.ts       ← OC 扫描到 → 报错
+
+# ✅ 新结构（prompts.ts 在子目录不被扫描）
+plugins/
+├── fractal.ts       (import "./lib/prompts.js")
+└── lib/
+    └── prompts.ts   ← 子目录，不被 OC 扫描
+```
+
+### 坑 8：1.18.x `file://` URL 不再支持
+
+**现象**：`opencode.json` 的 `plugin` 数组中写 `"file:///C:/Users/.../plugins/xxx.ts"` 不加载  
+**根因**：OC 1.18 的 `resolvePluginTarget` 可能不处理本地 `file://` URL，或处理失败时静默跳过  
+**替代方案**：依赖自动发现（放在 `plugins/` 目录）或发布为 npm 包
