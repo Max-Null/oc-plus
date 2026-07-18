@@ -999,6 +999,11 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
 
     /**
      * 双通道注入：在用户消息到达时注入警告（同轮可见，比 system.transform 更即时）
+     *
+     * 数据流：event hook（触发线2/4）→ pendingWarnings 队列 → chat.message 注入 → 清空
+     * 与 system.transform 的频率逻辑互补：
+     *   - chat.message：每轮用户消息都注入 pending warnings（即时反馈，不做节流）
+     *   - system.transform：knowledge/habits 按 NUDGE_INTERVAL 节流（减少 prompt 污染）
      */
     "chat.message": async (
       _input: unknown,

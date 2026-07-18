@@ -763,6 +763,13 @@ export const FractalPlugin = async (input, _options) => {
     // 注入频率控制：knowledge 索引 + habits 不每轮都塞
     let turnCounter = 0;
     const NUDGE_INTERVAL = 5; // 每 N 轮注入一次 knowledge/habits 索引
+    const MAX_KNOWLEDGE_INJECT = 5; // 记忆反馈：单轮最多注入 N 条
+    // 动态阈值：分析次数递增时阈值翻倍，避免长会话频繁触发 LLM 分析
+    let analysisCount = 0;
+    // 双通道注入：chat.message 同轮警告（比 system.transform 跨轮提醒更即时）
+    let pendingWarnings = [];
+    // 触发线 2：滑动窗口（最近 5 条 tool call 的文件路径）
+    const recentToolPaths = [];
     return {
         /**
          * 会话启动时：
@@ -806,8 +813,10 @@ export const FractalPlugin = async (input, _options) => {
             }
             catch { /* 静默 */ }
             const newEvents = getNewEvents();
-            debug(`FRACTAL: 新事件数=${newEvents.length}，阈值=${ANALYSIS_THRESHOLD}`);
-            if (forceLearn || newEvents.length >= ANALYSIS_THRESHOLD) {
+            // 动态阈值：首次 20 条，第 N 次 20 * 2^N 条（上限 400）
+            const dynamicThreshold = Math.min(ANALYSIS_THRESHOLD * Math.pow(2, analysisCount), 400);
+            debug(`FRACTAL: 新事件数=${newEvents.length}，阈值=${dynamicThreshold}（第 ${analysisCount + 1} 次分析）`);
+            if (forceLearn || newEvents.length >= dynamicThreshold) {
                 debug("FRACTAL: 触发 LLM 自主学习分析...");
                 const result = await analyzeAndUpdate(newEvents, memoryPaths);
                 if (result && result !== "NO_NEW_HABITS") {
@@ -820,6 +829,8 @@ export const FractalPlugin = async (input, _options) => {
                 const lastEvent = newEvents[newEvents.length - 1];
                 const lastTs = JSON.parse(lastEvent).ts;
                 saveLastAnalysis(lastTs, newEvents.length);
+                analysisCount++;
+                debug(`FRACTAL: 分析完成，下次阈值=${Math.min(ANALYSIS_THRESHOLD * Math.pow(2, analysisCount), 400)}`);
             }
             // ---- 步骤 2：注入 blocks + triggers ----
             const { blocks, triggers } = mergeBlocksAndTriggers(memoryPaths);
@@ -831,16 +842,36 @@ export const FractalPlugin = async (input, _options) => {
             const pendingCount = pendingBlocks.length + pendingTriggers.length;
             const knowledgeItems = blocks.filter(b => b.type === "knowledge" && b.status !== "pending")
                 .concat(triggers.filter(t => t.type === "knowledge" && t.status !== "pending"));
-            // 注入 knowledge 索引（仅 nudge turn 注入，减少提示膨胀）
-            if (isNudgeTurn && knowledgeItems.length > 0) {
-                const indexLines = knowledgeItems.map(k => {
+            // 记忆反馈：按文件 mtime 排序，最近修改的优先注入（pursuit）；
+            // 超过 MAX_KNOWLEDGE_INJECT 条的旧知识被截断（dismissal）
+            const scored = [];
+            for (const k of knowledgeItems) {
+                const mp = memoryPaths[parseInt(k.memPathIndex, 10)] || MEMORIES_DIR;
+                const subDir = k.human_description !== undefined ? "triggers" : "blocks";
+                const fpath = path.join(mp, subDir, k.fileName);
+                try {
+                    scored.push({ item: k, mtime: fs.statSync(fpath).mtimeMs });
+                }
+                catch {
+                    scored.push({ item: k, mtime: 0 });
+                }
+            }
+            scored.sort((a, b) => b.mtime - a.mtime); // 最近修改的排前面
+            const topKnowledge = scored.slice(0, MAX_KNOWLEDGE_INJECT);
+            const trimmed = scored.length - topKnowledge.length;
+            // 注入 knowledge 索引（仅 nudge turn 注入，按 mtime 排序优先展示活跃知识）
+            if (isNudgeTurn && topKnowledge.length > 0) {
+                const indexLines = topKnowledge.map(({ item: k }) => {
                     const desc = k.human_description || k.description;
                     const mp = memoryPaths[parseInt(k.memPathIndex, 10)] || MEMORIES_DIR;
                     const subDir = k.human_description !== undefined ? "triggers" : "blocks";
                     const filePath = `${mp}/${subDir}/${k.fileName}`.replace(HOME, "~");
                     return `- **${desc}** → \`${filePath}\``;
                 });
-                output.system.push(`\n## 你记录的元知识索引\n以下是你之前记录的元知识摘要。遇到相关话题时，用 read 工具读取完整内容：\n\n${indexLines.join("\n")}\n`);
+                const truncationNote = trimmed > 0
+                    ? `\n> （共 ${scored.length} 条知识，仅展示最近活跃的 ${topKnowledge.length} 条。其余用 read 工具按需读取）`
+                    : "";
+                output.system.push(`\n## 你记录的元知识索引\n以下是你之前记录的元知识摘要。遇到相关话题时，用 read 工具读取完整内容：\n\n${indexLines.join("\n")}${truncationNote}\n`);
             }
             // 注入 auto habits（已确认的习惯，仅 nudge turn 注入）
             if (isNudgeTurn && autoHabits.length > 0) {
@@ -854,7 +885,8 @@ export const FractalPlugin = async (input, _options) => {
             }
             if (triggers.length > 0) {
                 const skipped = !isNudgeTurn ? " (间隔跳过注入)" : "";
-                debug(`FRACTAL: 注入 ${autoHabits.length} 个已确认 + ${suggestHabits.length} 个观察中 + ${knowledgeItems.length} 个元知识${skipped}`);
+                const trimInfo = trimmed > 0 ? ` 截断${trimmed}条` : "";
+                debug(`FRACTAL: 注入 ${autoHabits.length} 个已确认 + ${suggestHabits.length} 个观察中 + ${knowledgeItems.length} 个元知识→展示${topKnowledge.length}${trimInfo}${skipped}`);
             }
             // 注入 pending 确认提示
             if (pendingCount > 0) {
@@ -870,6 +902,19 @@ export const FractalPlugin = async (input, _options) => {
             const websearchRules = loadPrompt("websearch-rules.md", `## 🔍 联网查证规则（分形 Guardian）\n任何涉及以下类型的结论，**必须先调 websearch 查官方文档**，禁止凭训练数据记忆回答：\n- "XX 不支持 / 做不到 / 只有 N 种方法"\n- 系统能力对比\n- 穷举型列举\n- 从局部代码推测工具完整能力\n\nwebsearch 工具已就绪。先搜再说。`);
             output.system.push(`\n${websearchRules}\n`);
             // 回应模式已升级为 event hook 触发（V2.0），不再硬编码写入后调助理规则
+        },
+        /**
+         * 双通道注入：在用户消息到达时注入警告（同轮可见，比 system.transform 更即时）
+         */
+        "chat.message": async (_input, output) => {
+            if (pendingWarnings.length > 0) {
+                const warningText = `\n[分形 Guardian] ${pendingWarnings.join(" | ")}\n`;
+                if (output.parts) {
+                    output.parts.unshift({ type: "text", text: warningText, synthetic: true });
+                }
+                debug(`双通道注入: chat.message 注入 ${pendingWarnings.length} 条警告`);
+                pendingWarnings = []; // 一次性消费
+            }
         },
         /**
          * 监听事件：记录用户交互
@@ -928,9 +973,30 @@ export const FractalPlugin = async (input, _options) => {
             // 记录工具调用事件 + trigger 匹配（V2.0）
             if (event.type === "tool.execute.after") {
                 logEvent(event);
-                // 触发线 4：检测是否调用了联网查证工具
+                // 触发线 2：滑动窗口循环检测
                 const toolProps = event.properties;
                 const toolName = toolProps?.tool;
+                const toolArgs = toolProps?.args || toolProps?.input || {};
+                const filePath = toolArgs?.filePath || toolArgs?.path || toolArgs?.file || "";
+                if (filePath) {
+                    recentToolPaths.push(filePath);
+                    if (recentToolPaths.length > 5)
+                        recentToolPaths.shift();
+                    // 最近 5 次 tool call 中 ≥4 次操作同一文件 → 可能的死循环
+                    if (recentToolPaths.length >= 5) {
+                        const counts = {};
+                        for (const p of recentToolPaths) {
+                            counts[p] = (counts[p] || 0) + 1;
+                        }
+                        const maxCount = Math.max(...Object.values(counts));
+                        if (maxCount >= 4 && !isLinePaused("2")) {
+                            const topFile = Object.entries(counts).find(([_, c]) => c === maxCount)[0];
+                            pendingWarnings.push(`检测到最近 5 次操作中 ${maxCount} 次针对同一文件 "${topFile.replace(HOME, "~")}"——可能陷入无进展循环，请检查并切换到新策略`);
+                            debug(`触发线2: 循环检测命中 — ${maxCount}/5 次操作同一文件 → 双通道注入`);
+                        }
+                    }
+                }
+                // 触发线 4：检测是否调用了联网查证工具
                 if (toolName && WEBSEARCH_TOOLS.test(toolName)) {
                     websearchCalledThisTurn = true;
                     debug(`触发线4: 检测到联网查证 → ${toolName}`);

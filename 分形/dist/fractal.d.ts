@@ -30,6 +30,16 @@ export declare const FractalPlugin: (input: PluginInput, _options?: Record<strin
         system: string[];
     }) => Promise<void>;
     /**
+     * 双通道注入：在用户消息到达时注入警告（同轮可见，比 system.transform 更即时）
+     */
+    "chat.message": (_input: unknown, output: {
+        parts?: Array<{
+            type: string;
+            text?: string;
+            synthetic?: boolean;
+        }>;
+    }) => Promise<void>;
+    /**
      * 监听事件：记录用户交互
      */
     event: (input: {

@@ -76,7 +76,8 @@ export default { id: "xx", server: async (input) => { return hooks } }
 
 - `~/.config/opencode/plugins/*.ts` — 全局，启动时自动加载
 - `.opencode/plugins/*.ts` — 项目级，启动时自动加载
-- `opencode.json` 的 `plugin` 数组中写的是 **npm 包名**，不是本地文件
+- `opencode.json` 的 `plugin` 数组中写的是 **npm 包名或 `file://` URL**（1.18 中 `file://` 不再有效，仅 npm 包名可用）
+- ACP 已集成：与分形触发线分工明确（ACP 管压缩，分形管决策质量），推荐配置见文档
 
 ## 踩坑记录
 
