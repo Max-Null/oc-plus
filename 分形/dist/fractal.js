@@ -1,9 +1,9 @@
 /**
- * 分形 Plugin for OpenCode — v3.1
+ * 分形 Plugin for OpenCode — v3.3
  *
- * 四层触发线 Guardian Agent：
+ * 五条触发线 Guardian Agent：
  * - 触发线 1：文件写入匹配 trigger（glob→LLM→prompt）
- * - 触发线 2：连续无进展循环（滑动窗口→模板注入）
+ * - 触发线 2：连续无进展循环 + 无反馈环检测（滑动窗口→system.transform 注入）
  * - 触发线 4：主动联网查证（断言检测→分级计数器→system.transform 注入）
  * - 触发线 5：提交后知识提取（git commit 检测→LLM 分析→写入 blocks）
  *
@@ -43,12 +43,19 @@ const MAX_EVENTS_FOR_ANALYSIS = 200;
 const MAX_LOG_SIZE = 1 * 1024 * 1024; // 日志轮转阈值：1MB
 const ASSERTION_FLAG = path.join(MEMORIES_DIR, ".assertion-flag.json"); // B：断言检测信号文件
 const ASSERTION_COUNTER = path.join(MEMORIES_DIR, ".assertion-counter.json"); // 触发线 4：分级计数器
+const NO_FEEDBACK_STATE = path.join(MEMORIES_DIR, ".no-feedback-loop.json"); // 触发线 2 扩展：无反馈环检测
 // B：断言检测模式 — 匹配 LLM 凭记忆下的未验证结论
 const ASSERTION_RE = /(?:不支持|做不到|只有\s*\d+\s*种|(?<!\S)(?:没有|缺少)\s+\S+|不存在|无法\s+\S+|远[比低高]\S+|过于\S+)/;
 // 触发线 4：联网工具名检测（包含 websearch / webfetch 等）
 const WEBSEARCH_TOOLS = /websearch|web_search|webfetch/;
 // 触发线 4：计数器衰减阈值 — 连续 N 轮无断言后自动降级
 const COUNTER_DECAY_TURNS = 3;
+// 触发线 4：分级提醒的 count 阈值
+// 默认：1 次=温和提醒, 2-3 次=强硬提醒, 4+ 次=强制警告
+// 可在 assertion-reminder.md 首行用 <!-- thresholds: 1,3,5 --> 覆盖（逗号分隔）
+const ASSERTION_SECTION_THRESHOLDS = [1, 3]; // [温和上限, 强硬上限]，超过则为强制
+// 触发线 2 扩展：连续 N 轮有 file edit 但无 bash 执行后提醒
+const NO_FEEDBACK_THRESHOLD = 3;
 // /fractal pause <n> 检查：某条触发线是否被暂停
 function isLinePaused(line) {
     try {
@@ -86,6 +93,38 @@ function loadPromptSection(filename, section, vars, fallback) {
     }
     catch { /* 静默 */ }
     return fallback;
+}
+/**
+ * 从 assertion-reminder.md 首行解析自定义分级阈值
+ * 格式：<!-- thresholds: 1,3,5 -->（逗号分隔的递增整数列表）
+ * 解析成功时覆盖全局常量；失败/不存在时使用默认值 [1, 3]
+ */
+function parseAssertionThresholds() {
+    try {
+        const raw = loadPrompt("assertion-reminder.md", "");
+        const match = raw.match(/<!--\s*thresholds:\s*([\d,\s]+)\s*-->/);
+        if (match) {
+            const values = match[1].split(",").map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n) && n > 0);
+            values.sort((a, b) => a - b); // 确保递增
+            if (values.length >= 2) {
+                debug(`触发线4: 自定义阈值=[${values.join(", ")}]`);
+                return values;
+            }
+        }
+    }
+    catch { /* 静默 */ }
+    return ASSERTION_SECTION_THRESHOLDS; // 回退默认值
+}
+/**
+ * 根据 count 和阈值数组计算 section 编号（1-based）
+ * 阈值数组 [t1, t2, ...] 定义：count <= t1 → 1, count <= t2 → 2, ... > 最后一个 → n+1
+ */
+function getSection(count, thresholds) {
+    for (let i = 0; i < thresholds.length; i++) {
+        if (count <= thresholds[i])
+            return i + 1;
+    }
+    return thresholds.length + 1;
 }
 // ============================================================
 // 日志轮转：超过阈值时保留最近一段，其余丢弃
@@ -746,6 +785,27 @@ function decayCounter(sessionId) {
     // count === 0 时无需持久化衰减计数，不写磁盘（减少 IO）
     // 重启后 count 从 0 开始是正确的默认状态
 }
+function readNoFeedbackState() {
+    try {
+        if (fs.existsSync(NO_FEEDBACK_STATE)) {
+            const raw = JSON.parse(fs.readFileSync(NO_FEEDBACK_STATE, "utf-8"));
+            return {
+                consecutiveTurns: Number(raw.consecutiveTurns) || 0,
+                lastSessionId: String(raw.lastSessionId || ""),
+                updatedAt: String(raw.updatedAt || ""),
+            };
+        }
+    }
+    catch { /* 静默 */ }
+    return { consecutiveTurns: 0, lastSessionId: "", updatedAt: "" };
+}
+function saveNoFeedbackState(state) {
+    try {
+        state.updatedAt = new Date().toISOString();
+        fs.writeFileSync(NO_FEEDBACK_STATE, JSON.stringify(state, null, 2), "utf-8");
+    }
+    catch { /* 静默 */ }
+}
 // ============================================================
 // 触发线 5：提交后知识提取
 // ============================================================
@@ -880,6 +940,9 @@ export const FractalPlugin = async (input, _options) => {
     let assertionDetectedThisTurn = false;
     // 触发线 4：本轮是否已调用过联网查证工具
     let websearchCalledThisTurn = false;
+    // 触发线 2 扩展：本轮是否执行了 bash / 本轮 edit 次数
+    let bashCalledThisTurn = false;
+    let editsThisTurn = 0;
     // 注入频率控制：knowledge 索引 + habits 不每轮都塞
     let turnCounter = 0;
     const NUDGE_INTERVAL = 5; // 每 N 轮注入一次 knowledge/habits 索引
@@ -888,6 +951,8 @@ export const FractalPlugin = async (input, _options) => {
     let analysisCount = 0;
     // 双通道注入：chat.message 同轮警告（比 system.transform 跨轮提醒更即时）
     let pendingWarnings = [];
+    // 知识注入精准度：捕获上轮用户消息，用于关键词匹配
+    let lastUserMessage = "";
     return {
         /**
          * 会话启动时：
@@ -913,8 +978,10 @@ export const FractalPlugin = async (input, _options) => {
             }
             catch { /* 静默 */ }
             // 按计数器等级注入提醒（检查暂停标志，外部模板 ~/.config/opencode/fractal-prompts/assertion-reminder.md）
+            // 阈值可通过 assertion-reminder.md 首行 <!-- thresholds: 1,3,5 --> 自定义
             if (!isLinePaused("4") && c.count > 0) {
-                const section = c.count === 1 ? 1 : (c.count <= 3 ? 2 : 3);
+                const thresholds = parseAssertionThresholds();
+                const section = getSection(c.count, thresholds);
                 const reminder = loadPromptSection("assertion-reminder.md", section, { count: String(c.count), snippet: c.lastSnippet }, `\n## ⚠️ 分形：请先查证再下结论\n上一轮你说了「${c.lastSnippet}」但没有联网查证。`);
                 output.system.push(`\n${reminder}\n`);
             }
@@ -967,51 +1034,71 @@ export const FractalPlugin = async (input, _options) => {
             const pendingCount = pendingBlocks.length + pendingTriggers.length;
             const knowledgeItems = blocks.filter(b => b.type === "knowledge" && b.status !== "pending")
                 .concat(triggers.filter(t => t.type === "knowledge" && t.status !== "pending"));
-            // 记忆反馈：按文件 mtime 排序，最近修改的优先注入（pursuit）；
-            // 超过 MAX_KNOWLEDGE_INJECT 条的旧知识被截断（dismissal）
+            // 记忆反馈：关键词匹配优先 → mtime 排序（pursuit/dismissal）
+            // 从用户消息中提取关键词，匹配到知识描述的优先展示；超出 MAX_KNOWLEDGE_INJECT 的被截断
+            const userKeywords = lastUserMessage
+                ? [...new Set(lastUserMessage.toLowerCase().split(/[\s,，。.!！?？:：;；、\(\)（）\[\]【】"「」『』\n\r\t]+/).filter(t => t.length >= 2))]
+                : [];
             const scored = [];
             for (const k of knowledgeItems) {
                 const mp = memoryPaths[parseInt(k.memPathIndex, 10)] || MEMORIES_DIR;
                 const subDir = k.human_description !== undefined ? "triggers" : "blocks";
                 const fpath = path.join(mp, subDir, k.fileName);
+                const desc = (k.human_description || k.description || "").toLowerCase();
+                const body = (k.content || k.value || "").toLowerCase();
+                // 计算关键词命中数——匹配到的知识更可能对当前任务有用
+                const hits = userKeywords.length > 0
+                    ? userKeywords.filter(kw => desc.includes(kw) || body.includes(kw)).length
+                    : 0;
                 try {
-                    scored.push({ item: k, mtime: fs.statSync(fpath).mtimeMs });
+                    scored.push({ item: k, mtime: fs.statSync(fpath).mtimeMs, relevance: hits });
                 }
                 catch {
-                    scored.push({ item: k, mtime: 0 });
+                    scored.push({ item: k, mtime: 0, relevance: hits });
                 }
             }
-            scored.sort((a, b) => b.mtime - a.mtime); // 最近修改的排前面
+            scored.sort((a, b) => {
+                if (b.relevance !== a.relevance)
+                    return b.relevance - a.relevance; // 关键词匹配优先
+                return b.mtime - a.mtime; // 同匹配度按最近修改
+            });
             const topKnowledge = scored.slice(0, MAX_KNOWLEDGE_INJECT);
+            const matchedCount = topKnowledge.filter(s => s.relevance > 0).length;
             const trimmed = scored.length - topKnowledge.length;
-            // 注入 knowledge 索引（仅 nudge turn 注入，按 mtime 排序优先展示活跃知识）
+            // 注入 knowledge 索引（仅 nudge turn 注入，关键词匹配优先 → mtime 排序）
             if (isNudgeTurn && topKnowledge.length > 0) {
-                const indexLines = topKnowledge.map(({ item: k }) => {
+                const indexLines = topKnowledge.map(({ item: k, relevance }) => {
                     const desc = k.human_description || k.description;
                     const mp = memoryPaths[parseInt(k.memPathIndex, 10)] || MEMORIES_DIR;
                     const subDir = k.human_description !== undefined ? "triggers" : "blocks";
                     const filePath = `${mp}/${subDir}/${k.fileName}`.replace(HOME, "~");
-                    return `- **${desc}** → \`${filePath}\``;
+                    const tag = relevance > 0 ? " [相关]" : "";
+                    return `- **${desc}**${tag} → \`${filePath}\``;
                 });
+                const matchNote = matchedCount > 0
+                    ? `（其中 ${matchedCount} 条命中关键词）`
+                    : "";
                 const truncationNote = trimmed > 0
-                    ? `\n> （共 ${scored.length} 条知识，仅展示最近活跃的 ${topKnowledge.length} 条。其余用 read 工具按需读取）`
+                    ? `\n> （共 ${scored.length} 条知识，仅展示 ${topKnowledge.length} 条${matchNote}。其余用 read 工具按需读取）`
                     : "";
                 output.system.push(`\n## 你记录的元知识索引\n以下是你之前记录的元知识摘要。遇到相关话题时，用 read 工具读取完整内容：\n\n${indexLines.join("\n")}${truncationNote}\n`);
             }
             // 注入 auto habits（已确认的习惯，仅 nudge turn 注入）
+            // 改为指令语气：这不是观察结论，是 LLM 必须照做的默认行为
             if (isNudgeTurn && autoHabits.length > 0) {
-                const triggerTexts = autoHabits.map(t => `**[已确认的习惯] ${t.human_description}**\n${t.content}`).join("\n\n");
-                output.system.push(`\n## 已确认的习惯\n你在以下场景会自然地做这些事——像肌肉记忆一样：\n\n${triggerTexts}\n`);
+                const triggerTexts = autoHabits.map(t => `**[默认行为] ${t.human_description}**\n${t.content}`).join("\n\n");
+                output.system.push(`\n## 默认行为（无需确认，直接执行）\n以下是你的默认行为规则——像肌肉记忆一样，触发场景时自动照做：\n\n${triggerTexts}\n`);
             }
             // 注入 suggest habits（观察中的习惯，仅 nudge turn 注入）
             if (isNudgeTurn && suggestHabits.length > 0) {
-                const triggerTexts = suggestHabits.map(t => `**[观察中的习惯] ${t.human_description}**\n${t.content}`).join("\n\n");
-                output.system.push(`\n## 观察中的习惯\n你偶尔在以下场景做这些事，还不够确定，仅供参考：\n\n${triggerTexts}\n`);
+                const triggerTexts = suggestHabits.map(t => `**[待观察的习惯] ${t.human_description}**\n${t.content}`).join("\n\n");
+                output.system.push(`\n## 待观察的习惯\n你偶尔在以下场景做这些事，还不够确定，仅供参考：\n\n${triggerTexts}\n`);
             }
             if (triggers.length > 0) {
                 const skipped = !isNudgeTurn ? " (间隔跳过注入)" : "";
                 const trimInfo = trimmed > 0 ? ` 截断${trimmed}条` : "";
-                debug(`FRACTAL: 注入 ${autoHabits.length} 个已确认 + ${suggestHabits.length} 个观察中 + ${knowledgeItems.length} 个元知识→展示${topKnowledge.length}${trimInfo}${skipped}`);
+                const matchInfo = matchedCount > 0 ? ` 命中${matchedCount}条` : "";
+                debug(`FRACTAL: 注入 ${autoHabits.length} 个已确认 + ${suggestHabits.length} 个观察中 + ${knowledgeItems.length} 个元知识→展示${topKnowledge.length}${matchInfo}${trimInfo}${skipped}`);
             }
             // 注入 pending 确认提示
             if (pendingCount > 0) {
@@ -1027,6 +1114,18 @@ export const FractalPlugin = async (input, _options) => {
             const websearchRules = loadPrompt("websearch-rules.md", `## 🔍 联网查证规则（分形 Guardian）\n任何涉及以下类型的结论，**必须先调 websearch 查官方文档**，禁止凭训练数据记忆回答：\n- "XX 不支持 / 做不到 / 只有 N 种方法"\n- 系统能力对比\n- 穷举型列举\n- 从局部代码推测工具完整能力\n\nwebsearch 工具已就绪。先搜再说。`);
             output.system.push(`\n${websearchRules}\n`);
             // 回应模式已升级为 event hook 触发（V2.0），不再硬编码写入后调助理规则
+            // 触发线 2 扩展：无反馈环检测 → 通过 system.transform 注入提醒（下一轮生效）
+            if (!isLinePaused("2")) {
+                const nfs = readNoFeedbackState();
+                if (nfs.consecutiveTurns >= NO_FEEDBACK_THRESHOLD) {
+                    const warning = `\n## ⚠️ 分形：缺少反馈环\n连续 ${nfs.consecutiveTurns} 轮修改代码但未执行测试。按照结构化调试流程，先建立反馈环再修复（Phase 1）。在下一轮修改代码前，先跑一次相关测试建立"能变红"的反馈环。\n`;
+                    output.system.push(warning);
+                    debug(`触发线2扩展: system.transform 注入无反馈环警告，consecutiveTurns=${nfs.consecutiveTurns}`);
+                    // 注入后重置计数，避免连续警告
+                    nfs.consecutiveTurns = 0;
+                    saveNoFeedbackState(nfs);
+                }
+            }
         },
         /**
          * 双通道注入：在用户消息到达时注入警告（同轮可见，比 system.transform 更即时）
@@ -1037,6 +1136,13 @@ export const FractalPlugin = async (input, _options) => {
          *   - system.transform：knowledge/habits 按 NUDGE_INTERVAL 节流（减少 prompt 污染）
          */
         "chat.message": async (_input, output) => {
+            // 捕获用户消息文本（用于知识注入关键词匹配）
+            const userText = (output.parts || [])
+                .filter(p => p.type === "text" && !p.synthetic)
+                .map(p => p.text || "")
+                .join(" ");
+            if (userText)
+                lastUserMessage = userText;
             if (pendingWarnings.length > 0) {
                 const warningText = `\n[分形 Guardian] ${pendingWarnings.join(" | ")}\n`;
                 if (output.parts) {
@@ -1063,7 +1169,12 @@ export const FractalPlugin = async (input, _options) => {
                             if (p?.type === "tool_call" && WEBSEARCH_TOOLS.test(String(p?.tool || ""))) {
                                 websearchCalledThisTurn = true;
                                 debug(`触发线4: 检测到联网查证 → ${p.tool}`);
-                                break;
+                                // 不 break——同一条消息可能同时有 websearch 和 bash
+                            }
+                            // 触发线 2 扩展：检测 bash 执行（作为"反馈环存在"的证据）
+                            if (p?.type === "tool_call" && /^bash$/i.test(String(p?.tool || ""))) {
+                                bashCalledThisTurn = true;
+                                debug(`触发线2扩展: 检测到 bash 执行 → 反馈环存在`);
                             }
                         }
                     }
@@ -1073,8 +1184,27 @@ export const FractalPlugin = async (input, _options) => {
                         if (!assertionDetectedThisTurn) {
                             decayCounter(sessionID || "");
                         }
+                        // 触发线 2 扩展：用户新消息 → 处理上一轮的反馈环状态
+                        const nfs = readNoFeedbackState();
+                        // 跨会话重置
+                        if (nfs.lastSessionId && nfs.lastSessionId !== (sessionID || "")) {
+                            nfs.consecutiveTurns = 0;
+                            nfs.lastSessionId = sessionID || "";
+                        }
+                        // 上轮有 edit 但无 bash → 递增；有 bash → 重置；无 edit → 保持
+                        if (editsThisTurn > 0 && !bashCalledThisTurn) {
+                            nfs.consecutiveTurns++;
+                            debug(`触发线2扩展: consecutiveTurns=${nfs.consecutiveTurns}（上轮 ${editsThisTurn} 次 edit，无 bash）`);
+                        }
+                        else if (bashCalledThisTurn) {
+                            nfs.consecutiveTurns = 0;
+                            debug(`触发线2扩展: 上轮有 bash → 重置计数`);
+                        }
+                        saveNoFeedbackState(nfs);
                         websearchCalledThisTurn = false;
                         assertionDetectedThisTurn = false;
+                        bashCalledThisTurn = false;
+                        editsThisTurn = 0;
                         debug(`触发线4: 新用户消息 → 重置本轮标志`);
                     }
                     // 触发线 4：扫描 assistant 输出 → 分级计数而非简单标记
@@ -1106,6 +1236,7 @@ export const FractalPlugin = async (input, _options) => {
             }
             // 记录文件编辑事件 + trigger 匹配（V2.0）
             if (event.type === "file.edited" || event.type === "file.watcher.updated") {
+                editsThisTurn++; // 触发线 2 扩展：累计本轮编辑次数
                 logEvent(event);
                 tryTriggerMatch(event.properties);
             }
@@ -1178,7 +1309,7 @@ export const FractalPlugin = async (input, _options) => {
             if (hasMemories) {
                 const lines = [];
                 if (autoHabits.length > 0) {
-                    lines.push("## 已确认的习惯（跨会话持久）");
+                    lines.push("## 默认行为（跨会话持久，无需确认）");
                     lines.push(...autoHabits.map(t => `- [auto] ${t.human_description}`));
                     lines.push("");
                 }

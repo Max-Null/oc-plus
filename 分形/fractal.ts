@@ -65,6 +65,11 @@ const WEBSEARCH_TOOLS = /websearch|web_search|webfetch/;
 // 触发线 4：计数器衰减阈值 — 连续 N 轮无断言后自动降级
 const COUNTER_DECAY_TURNS = 3;
 
+// 触发线 4：分级提醒的 count 阈值
+// 默认：1 次=温和提醒, 2-3 次=强硬提醒, 4+ 次=强制警告
+// 可在 assertion-reminder.md 首行用 <!-- thresholds: 1,3,5 --> 覆盖（逗号分隔）
+const ASSERTION_SECTION_THRESHOLDS = [1, 3]; // [温和上限, 强硬上限]，超过则为强制
+
 // 触发线 2 扩展：连续 N 轮有 file edit 但无 bash 执行后提醒
 const NO_FEEDBACK_THRESHOLD = 3;
 
@@ -100,6 +105,38 @@ function loadPromptSection(filename: string, section: number, vars: Record<strin
     return template;
   } catch { /* 静默 */ }
   return fallback;
+}
+
+/**
+ * 从 assertion-reminder.md 首行解析自定义分级阈值
+ * 格式：<!-- thresholds: 1,3,5 -->（逗号分隔的递增整数列表）
+ * 解析成功时覆盖全局常量；失败/不存在时使用默认值 [1, 3]
+ */
+function parseAssertionThresholds(): number[] {
+  try {
+    const raw = loadPrompt("assertion-reminder.md", "");
+    const match = raw.match(/<!--\s*thresholds:\s*([\d,\s]+)\s*-->/);
+    if (match) {
+      const values = match[1].split(",").map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n) && n > 0);
+      values.sort((a, b) => a - b); // 确保递增
+      if (values.length >= 2) {
+        debug(`触发线4: 自定义阈值=[${values.join(", ")}]`);
+        return values;
+      }
+    }
+  } catch { /* 静默 */ }
+  return ASSERTION_SECTION_THRESHOLDS; // 回退默认值
+}
+
+/**
+ * 根据 count 和阈值数组计算 section 编号（1-based）
+ * 阈值数组 [t1, t2, ...] 定义：count <= t1 → 1, count <= t2 → 2, ... > 最后一个 → n+1
+ */
+function getSection(count: number, thresholds: number[]): number {
+  for (let i = 0; i < thresholds.length; i++) {
+    if (count <= thresholds[i]) return i + 1;
+  }
+  return thresholds.length + 1;
 }
 
 // ============================================================
@@ -973,6 +1010,9 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
   // 双通道注入：chat.message 同轮警告（比 system.transform 跨轮提醒更即时）
   let pendingWarnings: string[] = [];
 
+  // 知识注入精准度：捕获上轮用户消息，用于关键词匹配
+  let lastUserMessage = "";
+
   return {
     /**
      * 会话启动时：
@@ -1005,8 +1045,10 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
       } catch { /* 静默 */ }
 
       // 按计数器等级注入提醒（检查暂停标志，外部模板 ~/.config/opencode/fractal-prompts/assertion-reminder.md）
+      // 阈值可通过 assertion-reminder.md 首行 <!-- thresholds: 1,3,5 --> 自定义
       if (!isLinePaused("4") && c.count > 0) {
-        const section = c.count === 1 ? 1 : (c.count <= 3 ? 2 : 3);
+        const thresholds = parseAssertionThresholds();
+        const section = getSection(c.count, thresholds);
         const reminder = loadPromptSection("assertion-reminder.md", section,
           { count: String(c.count), snippet: c.lastSnippet },
           `\n## ⚠️ 分形：请先查证再下结论\n上一轮你说了「${c.lastSnippet}」但没有联网查证。`
@@ -1067,31 +1109,48 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
       const knowledgeItems = (blocks.filter(b => b.type === "knowledge" && b.status !== "pending") as any[])
         .concat(triggers.filter(t => t.type === "knowledge" && t.status !== "pending") as any[]);
 
-      // 记忆反馈：按文件 mtime 排序，最近修改的优先注入（pursuit）；
-      // 超过 MAX_KNOWLEDGE_INJECT 条的旧知识被截断（dismissal）
-      const scored: Array<{ item: any; mtime: number }> = [];
+      // 记忆反馈：关键词匹配优先 → mtime 排序（pursuit/dismissal）
+      // 从用户消息中提取关键词，匹配到知识描述的优先展示；超出 MAX_KNOWLEDGE_INJECT 的被截断
+      const userKeywords = lastUserMessage
+        ? [...new Set(lastUserMessage.toLowerCase().split(/[\s,，。.!！?？:：;；、\(\)（）\[\]【】"「」『』\n\r\t]+/).filter(t => t.length >= 2))]
+        : [];
+      const scored: Array<{ item: any; mtime: number; relevance: number }> = [];
       for (const k of knowledgeItems) {
         const mp = memoryPaths[parseInt((k as any).memPathIndex, 10)] || MEMORIES_DIR;
         const subDir = (k as any).human_description !== undefined ? "triggers" : "blocks";
         const fpath = path.join(mp, subDir, (k as any).fileName);
-        try { scored.push({ item: k, mtime: fs.statSync(fpath).mtimeMs }); }
-        catch { scored.push({ item: k, mtime: 0 }); }
+        const desc = ((k as any).human_description || (k as any).description || "").toLowerCase();
+        const body = ((k as any).content || (k as any).value || "").toLowerCase();
+        // 计算关键词命中数——匹配到的知识更可能对当前任务有用
+        const hits = userKeywords.length > 0
+          ? userKeywords.filter(kw => desc.includes(kw) || body.includes(kw)).length
+          : 0;
+        try { scored.push({ item: k, mtime: fs.statSync(fpath).mtimeMs, relevance: hits }); }
+        catch { scored.push({ item: k, mtime: 0, relevance: hits }); }
       }
-      scored.sort((a, b) => b.mtime - a.mtime); // 最近修改的排前面
+      scored.sort((a, b) => {
+        if (b.relevance !== a.relevance) return b.relevance - a.relevance; // 关键词匹配优先
+        return b.mtime - a.mtime; // 同匹配度按最近修改
+      });
       const topKnowledge = scored.slice(0, MAX_KNOWLEDGE_INJECT);
+      const matchedCount = topKnowledge.filter(s => s.relevance > 0).length;
       const trimmed = scored.length - topKnowledge.length;
 
-      // 注入 knowledge 索引（仅 nudge turn 注入，按 mtime 排序优先展示活跃知识）
+      // 注入 knowledge 索引（仅 nudge turn 注入，关键词匹配优先 → mtime 排序）
       if (isNudgeTurn && topKnowledge.length > 0) {
-        const indexLines = topKnowledge.map(({ item: k }) => {
+        const indexLines = topKnowledge.map(({ item: k, relevance }) => {
           const desc = (k as any).human_description || k.description;
           const mp = memoryPaths[parseInt((k as any).memPathIndex, 10)] || MEMORIES_DIR;
           const subDir = (k as any).human_description !== undefined ? "triggers" : "blocks";
           const filePath = `${mp}/${subDir}/${(k as any).fileName}`.replace(HOME, "~");
-          return `- **${desc}** → \`${filePath}\``;
+          const tag = relevance > 0 ? " [相关]" : "";
+          return `- **${desc}**${tag} → \`${filePath}\``;
         });
+        const matchNote = matchedCount > 0
+          ? `（其中 ${matchedCount} 条命中关键词）`
+          : "";
         const truncationNote = trimmed > 0
-          ? `\n> （共 ${scored.length} 条知识，仅展示最近活跃的 ${topKnowledge.length} 条。其余用 read 工具按需读取）`
+          ? `\n> （共 ${scored.length} 条知识，仅展示 ${topKnowledge.length} 条${matchNote}。其余用 read 工具按需读取）`
           : "";
         output.system.push(
           `\n## 你记录的元知识索引\n以下是你之前记录的元知识摘要。遇到相关话题时，用 read 工具读取完整内容：\n\n${indexLines.join("\n")}${truncationNote}\n`
@@ -1099,29 +1158,31 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
       }
 
       // 注入 auto habits（已确认的习惯，仅 nudge turn 注入）
+      // 改为指令语气：这不是观察结论，是 LLM 必须照做的默认行为
       if (isNudgeTurn && autoHabits.length > 0) {
         const triggerTexts = autoHabits.map(t =>
-          `**[已确认的习惯] ${t.human_description}**\n${t.content}`
+          `**[默认行为] ${t.human_description}**\n${t.content}`
         ).join("\n\n");
         output.system.push(
-          `\n## 已确认的习惯\n你在以下场景会自然地做这些事——像肌肉记忆一样：\n\n${triggerTexts}\n`
+          `\n## 默认行为（无需确认，直接执行）\n以下是你的默认行为规则——像肌肉记忆一样，触发场景时自动照做：\n\n${triggerTexts}\n`
         );
       }
 
       // 注入 suggest habits（观察中的习惯，仅 nudge turn 注入）
       if (isNudgeTurn && suggestHabits.length > 0) {
         const triggerTexts = suggestHabits.map(t =>
-          `**[观察中的习惯] ${t.human_description}**\n${t.content}`
+          `**[待观察的习惯] ${t.human_description}**\n${t.content}`
         ).join("\n\n");
         output.system.push(
-          `\n## 观察中的习惯\n你偶尔在以下场景做这些事，还不够确定，仅供参考：\n\n${triggerTexts}\n`
+          `\n## 待观察的习惯\n你偶尔在以下场景做这些事，还不够确定，仅供参考：\n\n${triggerTexts}\n`
         );
       }
 
       if (triggers.length > 0) {
         const skipped = !isNudgeTurn ? " (间隔跳过注入)" : "";
         const trimInfo = trimmed > 0 ? ` 截断${trimmed}条` : "";
-        debug(`FRACTAL: 注入 ${autoHabits.length} 个已确认 + ${suggestHabits.length} 个观察中 + ${knowledgeItems.length} 个元知识→展示${topKnowledge.length}${trimInfo}${skipped}`);
+        const matchInfo = matchedCount > 0 ? ` 命中${matchedCount}条` : "";
+        debug(`FRACTAL: 注入 ${autoHabits.length} 个已确认 + ${suggestHabits.length} 个观察中 + ${knowledgeItems.length} 个元知识→展示${topKnowledge.length}${matchInfo}${trimInfo}${skipped}`);
       }
 
       // 注入 pending 确认提示
@@ -1175,6 +1236,13 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
       _input: unknown,
       output: { parts?: Array<{ type: string; text?: string; synthetic?: boolean }> }
     ) => {
+      // 捕获用户消息文本（用于知识注入关键词匹配）
+      const userText = (output.parts || [])
+        .filter(p => p.type === "text" && !p.synthetic)
+        .map(p => p.text || "")
+        .join(" ");
+      if (userText) lastUserMessage = userText;
+
       if (pendingWarnings.length > 0) {
         const warningText = `\n[分形 Guardian] ${pendingWarnings.join(" | ")}\n`;
         if (output.parts) {
@@ -1360,7 +1428,7 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
       if (hasMemories) {
         const lines: string[] = [];
         if (autoHabits.length > 0) {
-          lines.push("## 已确认的习惯（跨会话持久）");
+          lines.push("## 默认行为（跨会话持久，无需确认）");
           lines.push(...autoHabits.map(t => `- [auto] ${t.human_description}`));
           lines.push("");
         }
