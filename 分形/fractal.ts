@@ -1,5 +1,5 @@
 /**
- * 分形 Plugin for OpenCode — v3.3
+ * 分形 Plugin for OpenCode — v3.4
  *
  * 五条触发线 Guardian Agent：
  * - 触发线 1：文件写入匹配 trigger（glob→LLM→prompt）
