@@ -5,6 +5,7 @@
  * - 触发线 1：文件写入匹配 trigger（glob→LLM→prompt）
  * - 触发线 2：连续无进展循环（滑动窗口→模板注入）
  * - 触发线 4：主动联网查证（断言检测→分级计数器→system.transform 注入）
+ * - 触发线 5：提交后知识提取（git commit 检测→LLM 分析→写入 blocks）
  *
  * 三层记忆架构：
  * - 全局：~/.config/opencode/memories/
