@@ -4,8 +4,8 @@
 
 ```
 /fractal status   — 查看所有触发线状态
-/fractal pause <n> — 暂停触发线 n（1-4）
-/fractal resume <n> — 恢复触发线 n
+/fractal pause <n> — 暂停触发线 n（1-5）
+/fractal resume <n> — 恢复触发线 n（1-5）
 /fractal learn    — 手动触发自主学习分析
 ```
 
@@ -16,8 +16,10 @@
 
 1. `~/.config/opencode/memories/.fractal-pause-2.json` — 存在=触发线 2 暂停
 2. `~/.config/opencode/memories/.fractal-pause-4.json` — 存在=触发线 4 暂停
-3. `~/.config/opencode/memories/.assertion-counter.json` — 存在则读取 count，显示触发线 4 当前计数
-4. `~/.config/opencode/memories/.fractal-learn-flag.json` — 存在=学习中
+3. `~/.config/opencode/memories/.fractal-pause-5.json` — 存在=触发线 5 暂停
+4. `~/.config/opencode/memories/.assertion-counter.json` — 存在则读取 count，显示触发线 4 当前计数
+5. `~/.config/opencode/memories/.fractal-learn-flag.json` — 存在=学习中
+6. `~/.config/opencode/memories/.commit-last-check.json` — 存在则读取 lastCommitDate，显示上次检测到的新提交时间
 
 如果标志文件都不存在，输出"所有触发线正常运行，无暂停"。
 

@@ -1,7 +1,7 @@
 # OC Plugin Hooks 完整参考
 
-> 来源：`@opencode-ai/plugin` 源码 `packages/plugin/src/index.ts` + OC 官方文档
-> 验证日期：2026-07-18
+> 来源：`@opencode-ai/plugin` 源码 `packages/plugin/src/index.ts` + OC 官方文档 + OC 1.18.3 实测
+> 验证日期：2026-07-19（OC 1.18.3 实测更新）
 
 ## 插件签名
 
@@ -48,8 +48,8 @@ interface PluginInput {
 | Message | `message.part.removed`, `message.part.updated`, `message.removed`, `message.updated` |
 | Permission | `permission.replied`, `permission.updated` |
 | Session | `session.created`, `session.compacted`, `session.deleted`, `session.diff`, `session.error`, `session.idle`, `session.status`, `session.updated` |
-| Shell | `shell.command.*` |
-| Tool | `tool.execute.after`, `tool.execute.before` |
+| Shell | `shell.command.*` | ⚠️ OC 1.18.3 实测为 `shell.exec`，非 `shell.command.*` |
+| Tool | `tool.execute.after`, `tool.execute.before` | ❌ OC 1.18.3 实测不触发（v1.17.x 可用） |
 | TUI | `tui.prompt.append`, `tui.command.execute`, `tui.toast.show` |
 
 ### 拦截/修改 Hooks
@@ -91,3 +91,18 @@ interface PluginInput {
 - `tool.execute.after` 不能从 hook 中调用 `client.agent.invoke()`
 - 替代方案：`client.session.prompt()` / `promptAsync()` + event hook
 - `@opencode-ai/plugin` 是纯类型包，无运行时代码——`import type` 在运行时被擦除
+
+## OC 1.18.3 实测差异
+
+基于 2026-07-19 在 OC 1.18.3 上的实测，部分 hook 行为与源码声明不一致：
+
+| Hook/事件 | 源码声明 | OC 1.18.3 实测 | 影响 |
+|-----------|---------|---------------|------|
+| `tool.execute.before` | 可用 | ❌ 不触发 | 触发线 5 无法用事件驱动 → 改轮询 `git log` |
+| `tool.execute.after` | 可用 | ❌ 不触发 | 无法捕获工具调用结果 |
+| `shell.command.*` | 通配符 | ⚠️ 实际事件名为 `shell.exec` | 监听 `shell.exec` 而非 `shell.command.*` |
+| `chat.message` | 修改消息 | ⚠️ 可读取但实际修改不生效 | 同轮注入无效 → 触发线 2 的双通道注入实际只有 system.transform 起效 |
+| `system.transform` | 可用 | ✅ 正常 | 分形核心注入通道 |
+| `message.updated` | 可用 | ✅ 正常 | 触发线 4 断言检测 |
+
+> **结论**：事件 hook 实际可用事件在 OC 1.18.3 中小于源码声明。涉及工具执行监控的功能应加轮询机制兜底。

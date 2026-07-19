@@ -8,13 +8,13 @@
 增强不替换：所有模块在 OC 原生体系上叠加，不替换原生 agent/tool
 ```
 
-## 当前状态（V3.4 · 2026-07-17）
+## 当前状态（V3.4 · 2026-07-19）
 
 | 模块 | 版本 | 状态 |
 |------|------|------|
 | 双星系统 | **V3.4** | ✅ skill感知 + 修改审查 + 工匠LSP + 参谋/军师顾问 |
 | agents-priority | — | ✅ AGENTS.md 中文规范前置，不被 omo-slim 淹没 |
-| 分形 | V3.0 | ✅ Guardian Agent + 三层记忆 + 自主知识记录 + B 断言检测 |
+| 分形 | V3.2 | ✅ Guardian Agent + 五条触发线 + 三层记忆 + 自主知识记录 + 断言检测 + 提交知识提取 |
 | AGENTS.md | — | ✅ 全局行为规范 |
 | CC 规则隔离 | — | ✅ `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT=1` |
 
@@ -38,23 +38,32 @@
 工匠 (subagent, temp 0.1) — CC Worker 风格编码执行者（带 LSP）
 ```
 
-## 记忆管家
+## 分形 Guardian Agent
 
 ```
-~/.config/opencode/plugins/memories.ts (643行)
-  ├── system.transform → 注入 blocks + triggers 到 system prompt
-  ├── event            → 记录 message/file/tool 事件到 events.log
-  ├── 分析触发          → 新会话启动时检查增量，LLM 自主学习习惯
-  └── session.compacting → 防压缩丢失
+~/.config/opencode/plugins/fractal.ts（分形/ 目录，OC 自动发现加载）
+  ├── system.transform     → 四条触发线的核心注入通道（规则注入 + 分级干预 + 知识索引）
+  ├── chat.message         → 同轮消息注入（通过 assistant parts 检测 websearch 调用）
+  ├── event                → 记录 message.updated/file.edited 等事件
+  ├── 触发线 1             → 文件写入匹配 trigger（三层漏斗：glob→LLM→prompt）
+  ├── 触发线 2             → 连续无进展循环（滑动窗口纯规则）
+  ├── 触发线 3             → 上下文压力（⏸️ ACP 已覆盖）
+  ├── 触发线 4             → 主动联网查证（ASSERTION_RE + 分级计数器）
+  ├── 触发线 5             → 提交后知识提取（轮询 git log → LLM 分析 → 写入 blocks/）
+  └── 频率控制             → knowledge/habits 每 5 轮注入，核心规则每轮注入
 
 ~/.config/opencode/memories/
-  ├── blocks/           ← 习惯描述（赛博分身自动维护）
-  ├── triggers/         ← 触发规则（赛博分身生成）
-  ├── events.log        ← 事件原始日志
-  ├── debug.log         ← 诊断日志
-  └── last-analysis.json ← 分析进度记录
+  ├── blocks/              ← 知识块（分形自动维护）
+  ├── triggers/            ← 触发规则（分形生成）
+  ├── events.log           ← 事件原始日志
+  ├── debug.log            ← 诊断日志
+  ├── .assertion-counter.json ← 触发线 4 分级计数
+  └── .commit-last-check.json ← 触发线 5 提交时间戳
 
-~/.config/opencode/agents/助理.md ← 赛博分身 agent
+分形/agents/助理.md        ← 赛博分身 agent 参考定义（不再自动调用）
+分形/prompts/              ← 可定制 prompt 模板（core-rules/websearch-rules/assertion-reminder）
+分形/scripts/              ← CLI 工具：fractal-cli
+分形/设计.md               ← 设计文档（V3.2）
 ```
 
 ## 部署
@@ -97,12 +106,14 @@ oc-plus/
 │   ├── agents/         Agent 定义（双星/工匠/参谋/军师）
 │   ├── commands/       自定义命令（double-star）
 │   └── archive/        历史版本归档
-├── 记忆管家/           ← 记忆系统：三层记忆 + 赛博分身 + 断言检测
-│   ├── agents/         助理 agent 定义（赛博分身）
-│   ├── scripts/        CLI 工具（memories-cli / test-analyze）
-│   ├── memories.ts     插件源码
-│   ├── prompts.ts      LLM prompt 模板
-│   └── 设计.md         设计文档
+├── 分形/               ← 分形 Guardian Agent：五条触发线 + 三层记忆 + 赛博分身
+│   ├── fractal.ts       插件源码（OC 自动发现加载）
+│   ├── lib/             prompt 工具模块（子目录不被 OC 扫描）
+│   ├── agents/          助理 agent 定义
+│   ├── prompts/         可定制 prompt 模板
+│   ├── scripts/         CLI 工具（fractal-cli）
+│   ├── archive/         历史版本归档
+│   └── 设计.md          设计文档
 ├── 技能/               ← 自定义 skill（mxy- 系列 8 个 + mxy-commit-review）
 ├── doc/                ← 项目文档
 │   ├── 知识/           CC vs OC 对比分析 + API 速查
