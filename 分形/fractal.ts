@@ -54,6 +54,7 @@ const MAX_EVENTS_FOR_ANALYSIS = 200;
 const MAX_LOG_SIZE = 1 * 1024 * 1024; // 日志轮转阈值：1MB
 const ASSERTION_FLAG = path.join(MEMORIES_DIR, ".assertion-flag.json"); // B：断言检测信号文件
 const ASSERTION_COUNTER = path.join(MEMORIES_DIR, ".assertion-counter.json"); // 触发线 4：分级计数器
+const NO_FEEDBACK_STATE = path.join(MEMORIES_DIR, ".no-feedback-loop.json"); // 触发线 2 扩展：无反馈环检测
 
 // B：断言检测模式 — 匹配 LLM 凭记忆下的未验证结论
 const ASSERTION_RE = /(?:不支持|做不到|只有\s*\d+\s*种|(?<!\S)(?:没有|缺少)\s+\S+|不存在|无法\s+\S+|远[比低高]\S+|过于\S+)/;
@@ -63,6 +64,9 @@ const WEBSEARCH_TOOLS = /websearch|web_search|webfetch/;
 
 // 触发线 4：计数器衰减阈值 — 连续 N 轮无断言后自动降级
 const COUNTER_DECAY_TURNS = 3;
+
+// 触发线 2 扩展：连续 N 轮有 file edit 但无 bash 执行后提醒
+const NO_FEEDBACK_THRESHOLD = 3;
 
 // /fractal pause <n> 检查：某条触发线是否被暂停
 function isLinePaused(line: string): boolean {
@@ -796,6 +800,37 @@ function decayCounter(sessionId: string) {
 }
 
 // ============================================================
+// 触发线 2 扩展：无反馈环状态（跨轮持久）
+// ============================================================
+
+interface NoFeedbackState {
+  consecutiveTurns: number; // 连续无反馈环的轮数
+  lastSessionId: string;
+  updatedAt: string;
+}
+
+function readNoFeedbackState(): NoFeedbackState {
+  try {
+    if (fs.existsSync(NO_FEEDBACK_STATE)) {
+      const raw = JSON.parse(fs.readFileSync(NO_FEEDBACK_STATE, "utf-8"));
+      return {
+        consecutiveTurns: Number(raw.consecutiveTurns) || 0,
+        lastSessionId: String(raw.lastSessionId || ""),
+        updatedAt: String(raw.updatedAt || ""),
+      };
+    }
+  } catch { /* 静默 */ }
+  return { consecutiveTurns: 0, lastSessionId: "", updatedAt: "" };
+}
+
+function saveNoFeedbackState(state: NoFeedbackState) {
+  try {
+    state.updatedAt = new Date().toISOString();
+    fs.writeFileSync(NO_FEEDBACK_STATE, JSON.stringify(state, null, 2), "utf-8");
+  } catch { /* 静默 */ }
+}
+
+// ============================================================
 // 触发线 5：提交后知识提取
 // ============================================================
 
@@ -922,6 +957,10 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
 
   // 触发线 4：本轮是否已调用过联网查证工具
   let websearchCalledThisTurn = false;
+
+  // 触发线 2 扩展：本轮是否执行了 bash / 本轮 edit 次数
+  let bashCalledThisTurn = false;
+  let editsThisTurn = 0;
 
   // 注入频率控制：knowledge 索引 + habits 不每轮都塞
   let turnCounter = 0;
@@ -1109,6 +1148,19 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
       output.system.push(`\n${websearchRules}\n`);
 
       // 回应模式已升级为 event hook 触发（V2.0），不再硬编码写入后调助理规则
+
+      // 触发线 2 扩展：无反馈环检测 → 通过 system.transform 注入提醒（下一轮生效）
+      if (!isLinePaused("2")) {
+        const nfs = readNoFeedbackState();
+        if (nfs.consecutiveTurns >= NO_FEEDBACK_THRESHOLD) {
+          const warning = `\n## ⚠️ 分形：缺少反馈环\n连续 ${nfs.consecutiveTurns} 轮修改代码但未执行测试。按照结构化调试流程，先建立反馈环再修复（Phase 1）。在下一轮修改代码前，先跑一次相关测试建立"能变红"的反馈环。\n`;
+          output.system.push(warning);
+          debug(`触发线2扩展: system.transform 注入无反馈环警告，consecutiveTurns=${nfs.consecutiveTurns}`);
+          // 注入后重置计数，避免连续警告
+          nfs.consecutiveTurns = 0;
+          saveNoFeedbackState(nfs);
+        }
+      }
     },
 
     /**
@@ -1153,7 +1205,12 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
               if (p?.type === "tool_call" && WEBSEARCH_TOOLS.test(String(p?.tool || ""))) {
                 websearchCalledThisTurn = true;
                 debug(`触发线4: 检测到联网查证 → ${p.tool}`);
-                break;
+                // 不 break——同一条消息可能同时有 websearch 和 bash
+              }
+              // 触发线 2 扩展：检测 bash 执行（作为"反馈环存在"的证据）
+              if (p?.type === "tool_call" && /^bash$/i.test(String(p?.tool || ""))) {
+                bashCalledThisTurn = true;
+                debug(`触发线2扩展: 检测到 bash 执行 → 反馈环存在`);
               }
             }
           }
@@ -1164,8 +1221,28 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
             if (!assertionDetectedThisTurn) {
               decayCounter(sessionID || "");
             }
+
+            // 触发线 2 扩展：用户新消息 → 处理上一轮的反馈环状态
+            const nfs = readNoFeedbackState();
+            // 跨会话重置
+            if (nfs.lastSessionId && nfs.lastSessionId !== (sessionID || "")) {
+              nfs.consecutiveTurns = 0;
+              nfs.lastSessionId = sessionID || "";
+            }
+            // 上轮有 edit 但无 bash → 递增；有 bash → 重置；无 edit → 保持
+            if (editsThisTurn > 0 && !bashCalledThisTurn) {
+              nfs.consecutiveTurns++;
+              debug(`触发线2扩展: consecutiveTurns=${nfs.consecutiveTurns}（上轮 ${editsThisTurn} 次 edit，无 bash）`);
+            } else if (bashCalledThisTurn) {
+              nfs.consecutiveTurns = 0;
+              debug(`触发线2扩展: 上轮有 bash → 重置计数`);
+            }
+            saveNoFeedbackState(nfs);
+
             websearchCalledThisTurn = false;
             assertionDetectedThisTurn = false;
+            bashCalledThisTurn = false;
+            editsThisTurn = 0;
             debug(`触发线4: 新用户消息 → 重置本轮标志`);
           }
 
@@ -1202,6 +1279,7 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
 
       // 记录文件编辑事件 + trigger 匹配（V2.0）
       if (event.type === "file.edited" || event.type === "file.watcher.updated") {
+        editsThisTurn++; // 触发线 2 扩展：累计本轮编辑次数
         logEvent(event);
         tryTriggerMatch(event.properties);
       }

@@ -6,7 +6,7 @@
 
 | 模块 | 版本 | 状态 |
 |------|------|------|
-| 双星系统 | V3.4 | ✅ skill感知 + 修改审查 + agents-priority |
+| 双星系统 | V3.5 | ✅ skill感知 + 修改审查 + agents-priority + 分形集成 |
 | 分形 Guardian Agent | V3.2 | ✅ 五条触发线全部实现 |
 | ACP 上下文精简 | latest | ✅ 已安装，OC 内置压缩已禁用 |
 | AGENTS.md | — | ✅ 持续维护 |
@@ -65,9 +65,9 @@
 
 ### 3.2 V3.5 — 分形集成优化
 
-- [ ] 双星 agent prompt 中增加「分形 Guardian Agent」指引：收到 `[分形]` 前缀消息时按用户指令处理
-- [ ] 观察分形 V2.1 LLM 自主学习后，blocks/ 和 triggers/ 的生成质量和频率
-- [ ] 如果 triggers/ 生成了 auto 级别的习惯，验证分形是否正确触发
+- [x] 双星 agent prompt 中增加「分形 Guardian Agent」指引：收到 `[分形]` 前缀消息时按用户指令处理
+- [x] 观察分形 V2.1 LLM 自主学习后，blocks/ 和 triggers/ 的生成质量和频率（blocks: 7 个知识块，5 个 auto，内容覆盖合理；triggers: 空，未生成）
+- [ ] 如果 triggers/ 生成了 auto 级别的习惯，验证分形是否正确触发（当前 triggers 为空，需等待分形在实际使用中生成触发规则后验证）
 
 ### 3.3 V4.0 — 深度集成方向
 
