@@ -1,9 +1,9 @@
 /**
- * 分形 Plugin for OpenCode — v3.1
+ * 分形 Plugin for OpenCode — v3.3
  *
- * 四层触发线 Guardian Agent：
+ * 五条触发线 Guardian Agent：
  * - 触发线 1：文件写入匹配 trigger（glob→LLM→prompt）
- * - 触发线 2：连续无进展循环（滑动窗口→模板注入）
+ * - 触发线 2：连续无进展循环 + 无反馈环检测（滑动窗口→system.transform 注入）
  * - 触发线 4：主动联网查证（断言检测→分级计数器→system.transform 注入）
  * - 触发线 5：提交后知识提取（git commit 检测→LLM 分析→写入 blocks）
  *
