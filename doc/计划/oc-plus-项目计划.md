@@ -80,7 +80,7 @@
 
 ### 3.4 已知问题
 
-- [ ] opencode.json 中 `/memories` 命令 template 有中文乱码（PowerShell GBK 编码问题），且命令名需更新
+- [x] opencode.json 中 `/memories` 命令模板乱码（PowerShell GBK 编码问题），已重命名为 `/fenxing`
 
 ---
 
@@ -89,4 +89,4 @@
 - [x] `doc/计划/README.md` 完善索引
 - [x] 部署脚本 `deploy.ps1` 覆盖分形 CLI 脚本和 prompts.ts
 - [x] README.md 模块版本更新
-- [ ] 修复 opencode.json 中 `/memories` 命令模板乱码 → 转为 UTF-8，重命名为 `/fenxing`
+- [x] 修复 opencode.json 中 `/memories` 命令模板乱码 → 转为 UTF-8，重命名为 `/fenxing`
