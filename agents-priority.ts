@@ -1,13 +1,11 @@
 /**
  * agents-priority Plugin for OpenCode
  *
- * 解决问题：oh-my-opencode-slim 将全英文 orchestrator prompt prepend 到
- * AGENTS.md 之前，导致 AGENTS.md 中的中文规范（语言规范、注释策略等）
- * 被淹没在注意力盲区，模型在 thinking 阶段被推向英文思维。
+ * 确保 AGENTS.md（中文规范：语言规范、注释策略等）始终位于 system prompt 最前面。
+ * 当其他插件/机制在 system prompt 前插入内容时，本插件将 AGENTS.md 挪回首位。
  *
- * 机制：omo-slim 的 experimental.chat.system.transform hook 执行
- *   output.system[0] = orchestratorPrompt + AGENTS.md
- * 本插件注册在 omo-slim 之后，hook 后执行，将 AGENTS.md 挪回最前面。
+ * 机制：experimental.chat.system.transform hook 后执行。
+ * 检查 system[0] 中 AGENTS.md 标记行位置——若不在首位，则将其前置。
  */
 
 import fs from "node:fs";

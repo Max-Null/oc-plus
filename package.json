@@ -17,7 +17,5 @@
     "@opencode-ai/plugin": "^1.17.18",
     "@opencode-ai/sdk": "^1.17.18"
   },
-  "devDependencies": {
-    "oh-my-opencode-slim": "^2.2.0"
-  }
+  "devDependencies": {}
 }

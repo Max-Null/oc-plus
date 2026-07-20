@@ -13,7 +13,7 @@
 | 模块 | 版本 | 状态 |
 |------|------|------|
 | 双星系统 | **V3.7** | ✅ skill感知 + 修改审查 + agents-priority + 分形集成 + 编码工程规范 + 工匠LSP深度 |
-| agents-priority | — | ✅ AGENTS.md 中文规范前置，不被 omo-slim 淹没 |
+| agents-priority | — | ✅ AGENTS.md 中文规范始终位于 system prompt 最前面 |
 | 分形 | V3.4 | ✅ Guardian Agent + 五条触发线 + 可配阈值 + 关键词注入 + 默认行为 + 三层记忆 + 自主知识记录 |
 | AGENTS.md | — | ✅ 全局行为规范 |
 | CC 规则隔离 | — | ✅ `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT=1` |
@@ -76,7 +76,7 @@
 
 **手动部署或新电脑首次安装时：**
 
-1. 确保 `opencode.json` 的 `plugin` 数组包含 `"memories"` 和 `"oh-my-opencode-slim"`
+1. 确保 `opencode.json` 的 `plugin` 数组包含 `"oc-plus-fractal"` 和 `"agents-priority"`
 2. 设置环境变量 `OPENCODE_EXPERIMENTAL_LSP_TOOL=true`（LSP 主动工具）
 3. 创建记忆存储目录：
    ```powershell

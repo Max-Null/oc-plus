@@ -12,4 +12,5 @@
 | `CC插件系统-OC改造参考.md` | CC 插件架构深度对比 + OC 改造优先级矩阵 | 2026-07-17 |
 | `权限控制机制对比-CC-vs-OC.md` | CC vs OC 权限模式对比 | 2026-07-15 |
 | `skill选型参考.md` | 35 个 skill 的分类索引和场景选型 | 2026-07-15 |
-| `omo-slim-agents-priority-fix.patch` | agents-priority 插件补丁 | — |
+| `omo-slim架构分析.md` | omo-slim v2.2.0 源码分析：17 个 hook、注入机制、MCP、skills、与双星对照 | 2026-07-20 |
+| `omo-slim-agents-priority-fix.patch` | agents-priority 插件补丁（已通过移除 omo-slim 插件根治） | — |

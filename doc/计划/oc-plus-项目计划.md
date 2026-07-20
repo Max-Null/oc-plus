@@ -1,6 +1,6 @@
 # oc-plus 项目计划
 
-> 状态：进行中 · 最后更新：2026-07-19
+> 状态：进行中 · 最后更新：2026-07-20
 
 ## 一、当前版本概览
 
@@ -8,8 +8,11 @@
 
 | 模块 | 版本 | 状态 |
 |------|------|------|
-| 双星系统 | V3.7 | ✅ skill感知 + 修改审查 + agents-priority + 分形集成 + 编码工程规范 + 工匠LSP深度 |
-| 分形 Guardian Agent | V3.4 | ✅ 五条触发线全部实现 + 可配阈值 + 关键词注入 + 默认行为 |
+| 双星系统 | V3.7 | ✅ skill感知 + 修改审查 + 编码工程规范 + 工匠LSP深度 |
+| 分形 Guardian Agent | V3.4 | ✅ 五条触发线 + 可配阈值 + 关键词注入 + 默认行为 |
+| agents-priority | — | ✅ AGENTS.md 中文规范始终位于 system prompt 最前面 |
+| MCP 服务器 | — | ✅ github / websearch / gh_grep / context7（opencode.json 直配，不依赖外部插件） |
+| 部署脚本 | V3.5 | ✅ 移除 omo-slim 依赖，新增 MCP 配置提醒 |
 | ACP 上下文精简 | latest | ✅ 已安装，OC 内置压缩已禁用 |
 | AGENTS.md | — | ✅ 持续维护 |
 | CC 规则隔离 | — | ✅ |
@@ -40,7 +43,7 @@
 
 | 阶段 | 优先级 | 内容 |
 |------|--------|------|
-| F1 反馈闭环 | 短期 | ~~Guardian 动态阈值~~ ✅；~~优化知识注入精准度~~ ✅；记忆反馈循环（pursuit/dismissal）；ACP 保护规则；事件 hook 恢复监控 |
+| F1 反馈闭环 | 短期 | ✅ Guardian 动态阈值；✅ 优化知识注入精准度；记忆反馈循环（pursuit/dismissal）；事件 hook 恢复监控 |
 | F2 协同与学习 | 中期 | 多触发线协同避免消息轰炸；跨会话学习；触发线 4 数据闭环（分析命中率、调优衰减算法） |
 
 ### 2.4 ACP 借鉴改进清单
@@ -62,7 +65,7 @@
 
 - [x] 双星 agent 新增 skill 感知：执行任务前先检查 available_skills
 - [x] 双星 agent 新增修改审查：改前计划 + 改后验证
-- [x] agents-priority 插件：确保 AGENTS.md 中文规范不被 omo-slim 英文 prompt 淹没
+- [x] agents-priority 插件：确保 AGENTS.md 中文规范始终位于 system prompt 最前面（omo-slim 已移除，插件功能从"对抗注入"转为"保险前置"）
 - [x] deploy.ps1 覆盖分形插件 + agents-priority 部署
 
 ### 3.2 P2 — 分形集成优化（✅ 已完成 2026-07-19）
@@ -82,6 +85,51 @@
 
 - [x] opencode.json 中 `/memories` 命令模板乱码（PowerShell GBK 编码问题），已重命名为 `/fenxing`
 
+### 3.5 P4 — omo-slim 移除后的待验证短板（2026-07-20）
+
+> 背景：oh-my-opencode-slim v2.2.0 插件通过 17 个 hook 修改了 OC 运行时——system prompt 注入、phase reminder、session 管理、agent 权限路由、工具拦截等。移除后双星首次以纯净环境运行，以下能力可能在 omo-slim 辅助下"隐形运转"，需在实际使用中逐项验证是否需要补全。
+>
+> 原则：不假设缺什么就补什么——先观察双星裸跑是否真的出问题，再决定是否补。
+
+#### 3.5.1 风险分级
+
+| # | 待验证项 | 风险 | 判断依据 |
+|---|---------|:--:|---------|
+| 1 | **四阶段纪律保持** | 🔴 高 | phase reminder 是每条消息注入的持续外部约束。失去后双星仅靠 prompt 自我约束，长对话中注意力衰减可能导致跳过阶段 |
+| 2 | **Task 结果追踪** | 🟡 中 | task-session-manager 自动追踪 + Background Job Board 状态通知。失去后双星需自行判断 task 完成时机，可能过早/过晚 |
+| 3 | **并发写冲突** | 🟢 低 | 双星已按"无依赖子任务可并行"原则调度，工匠各司其职，实际冲突概率低 |
+| 4 | **委托意识** | 🟢 低 | 双星 prompt 已有明确委托判断流程（简单自己干 / 复杂四阶段），post-file-tool-nudge 是冗余提醒 |
+| 5 | **子 agent 会话复用** | 🟢 低 | 纯 token 效率优化，不影响功能正确性 |
+| 6 | **工具调用错误恢复** | 🟢 低 | DeepSeek 模型极少 JSON 格式错误；task 调用失败有明确错误返回，双星可自行决策 |
+| 7 | **Agent MCP 权限路由** | 🟢 低 | 双星子 agent（工匠/参谋/军师/助理）设计上就不需要 MCP 工具，frontmatter 已正确配置。搜索由主 agent 自己用 websearch 完成 |
+
+#### 3.5.2 P4-1: 四阶段纪律保持（🔴 高优先级）
+
+**问题**：omo-slim 的 phase reminder 在每条消息末尾注入 `<system-reminder>Scheduler workflow: plan lanes → dispatch → track → reconcile → verify</system-reminder>`。这是持续的外部约束。失去后双星可能：
+- 简单任务直接动手，跳过"先对齐再动手"的理解确认
+- 复杂任务跳过规格制定（阶段 2），直接研究→实现
+- 实现后跳过亲自验证（阶段 4）
+
+**方案**：在双星 prompt 的 `## 工作方式` 节强化纪律——将"简单任务直接执行，复杂任务先列步骤"升级为明确的**强制检查点**，不依赖外部注入。
+
+**待办**：
+- [ ] 双星 prompt 增加「输出纪律」：每条回复开头必须输出 `###思考结果 <理解 + 打算>`（已有此规则，需确认在实际使用中是否严格遵循）
+- [x] 在阶段转换处增加「自检锚」：研究结果出来后自问"需要写规格吗？"、实现完成后自问"亲自验证了吗？"
+- [ ] 观察 3-5 次复杂任务后判断是否需要外部注入机制（fractal.ts 触发线）
+
+#### 3.5.3 P4-2: Task 结果追踪（🟡 中优先级）
+
+**问题**：omo-slim 的 task-session-manager 通过 `experimental.chat.messages.transform` 注入 Background Job Board 元数据，告诉 orchestrator 哪些 task 已完成。失去后双星：
+- 调工匠后不知道何时去读结果（过早 = 空等待，过晚 = 浪费时间）
+- 可能重复检查同一个 task
+
+**方案**：在双星 prompt 中明确 task 结果获取协议——调 task 后不应轮询，应等待 OC 自动通知结果。
+
+**待办**：
+- [ ] 确认 OC 原生行为：task 工具调用子 agent 完成后，结果是否自动追加到主 agent 上下文（大概率是——这是 OC 原生行为，omo-slim 只是额外加了 Board 管理）
+- [x] 如果 OC 有原生结果通知，双星无需额外处理；只需 prompt 中加一句「task 调用后等待结果自动返回，不要轮询」
+- [ ] 如果 OC 没有，需要 fractal.ts 新增触发线：检测 task 调用→追踪 session→完成后注入提醒
+
 ---
 
 ## 四、项目基础设施 — 待办
@@ -90,3 +138,6 @@
 - [x] 部署脚本 `deploy.ps1` 覆盖分形 CLI 脚本和 prompts.ts
 - [x] README.md 模块版本更新
 - [x] 修复 opencode.json 中 `/memories` 命令模板乱码 → 转为 UTF-8，重命名为 `/fenxing`
+- [x] 移除 oh-my-opencode-slim 插件 → 纯净双星评估环境（2026-07-20）
+- [x] MCP 服务器迁移：websearch/gh_grep/context7 从 omo-slim 内置转为 opencode.json 直配（2026-07-20）
+- [x] `doc/知识/omo-slim架构分析.md` 沉淀源码分析结论（2026-07-20）

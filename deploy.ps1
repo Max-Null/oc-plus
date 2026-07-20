@@ -1,9 +1,10 @@
 <#-----------------------------------------------------------------------------
      脚本: deploy.ps1
-      说明: 部署 oc-plus V3.1 agent 定义、命令和分形 Plugin 到 opencode 配置目录
-      版本: V3.1 | 2026-07-19
-    编码: UTF-8 with BOM
- ------------------------------------------------------------------------------#>
+       说明: 部署 oc-plus V3.5 agent 定义、命令和分形 Plugin 到 opencode 配置目录
+             MCP 服务器（websearch/gh_grep/context7）直接在 opencode.json 配置，无需外部插件
+       版本: V3.5 | 2026-07-20
+     编码: UTF-8 with BOM
+  ------------------------------------------------------------------------------#>
 param()
 
 Set-Location $PSScriptRoot
@@ -104,3 +105,4 @@ Write-Host "  成功: $($deployed.Count) | 跳过: $($skipped.Count) | 失败: $
 if ($skipped.Count -gt 0) { foreach ($s in $skipped) { Write-Host "    跳过: $s" -ForegroundColor Yellow } }
 if ($failed.Count -gt 0) { foreach ($f in $failed) { Write-Host "    失败: $f" -ForegroundColor Red } }
 Write-Host "`n~/.config/opencode/plugins/ 目录下插件自动发现，无需在 opencode.json plugin 列表中声明。" -ForegroundColor Cyan
+Write-Host "MCP 服务器（websearch/gh_grep/context7）需在 opencode.json 的 mcp 字段手动配置。" -ForegroundColor Yellow
