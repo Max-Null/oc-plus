@@ -1,9 +1,10 @@
 {
   "name": "oc-plus",
-  "version": "0.2.0",
-  "description": "OpenCode 80-point enhancement — V3.4 Dual-Star + skill-aware + Artisan coding agent + LSP support",
+  "version": "0.3.0",
+  "description": "OpenCode 80-point enhancement — V3.7 Dual-Star + fractal Guardian Agent + 14 built-in skills",
   "type": "module",
   "scripts": {
+    "deploy": "node deploy.mjs",
     "test": "echo \"wip\""
   },
   "keywords": [

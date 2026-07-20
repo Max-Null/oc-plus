@@ -20,7 +20,7 @@ oc-plus/
 │   ├── fractal.ts      插件源码
 │   ├── prompts.ts      LLM prompt 模板
 │   └── 设计.md
-├── 技能/               ← 自定义 skill（mxy- 系列 9 个）
+├── 技能/               ← 内置 skill：8 个 mxy-* + 6 个 omo-*
 ├── doc/                ← 项目文档
 │   ├── 知识/           CC vs OC 对比分析 + API 速查
 │   ├── 设计/           功能设计方案
@@ -42,8 +42,14 @@ oc-plus/
 |------|------|
 | `双星系统/` | 双星 primary agent + 工匠/参谋/军师 subagent + commands |
 | `分形/` | 分形插件（三层记忆 + Guardian Agent + B 断言检测 + 自主知识记录） |
-| `技能/` | mxy-commit-review 等 9 个自定义 skill |
+| `技能/` | mxy-commit-review 等 14 个内置 skill |
 | `doc/知识/` | CC vs OC 对比 + OC Plugin API 速查 + Hooks 完整列表 + 加载机制 + 上下文插件 |
+
+## opencode.json 配置要点
+
+- 插件名 `"fractal"` 对应文件 `plugins/fractal.ts`，**不要**写成 `"oc-plus-fractal"`
+- 默认 agent 键名为 `default_agent`，**不是** `agent`
+- `package.json` 中 `@opencode-ai/plugin` 和 `@opencode-ai/sdk` 版本应与 `opencode-ai` CLI 版本对齐（`npm view opencode-ai version`）
 
 ## 修改 OC 前先查本地知识库
 
@@ -59,4 +65,4 @@ oc-plus/
 
 ## 部署
 
-`.\deploy.ps1` — 部署所有 agent、插件、命令到 `~/.config/opencode/`
+`node deploy.mjs`（或 `.\deploy.ps1` 包装器）— 部署所有 agent、插件、命令到 `~/.config/opencode/`

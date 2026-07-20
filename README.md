@@ -69,21 +69,45 @@
 ## 部署
 
 ```powershell
+# Node.js 脚本（推荐，无编码问题）
+node deploy.mjs
+
+# 或通过 PowerShell 包装器
 .\deploy.ps1
 ```
 
-脚本会部署所有 agent（双星/工匠/参谋/军师/助理）、命令和记忆管家插件到 `~/.config/opencode/`。
+脚本自动执行 7 步：清理过期文件 → 创建目录 → 部署 agent/plugin → 命令 → 脚本 → prompt 模板 → 技能。
 
-**手动部署或新电脑首次安装时：**
+部署完成后，**手动编辑 `~/.config/opencode/opencode.json`** 完成以下配置：
 
-1. 确保 `opencode.json` 的 `plugin` 数组包含 `"oc-plus-fractal"` 和 `"agents-priority"`
-2. 设置环境变量 `OPENCODE_EXPERIMENTAL_LSP_TOOL=true`（LSP 主动工具）
-3. 创建记忆存储目录：
-   ```powershell
-   New-Item -ItemType Directory -Path "$env:USERPROFILE\.config\opencode\memories\blocks" -Force
-   New-Item -ItemType Directory -Path "$env:USERPROFILE\.config\opencode\memories\triggers" -Force
+1. **plugin 数组**应包含：
+   ```json
+   "plugin": ["~/.config/opencode/node_modules/superpowers", "fractal", "agents-priority"]
    ```
-4. 重启 OpenCode
+   > 插件名 `"fractal"` 必须与文件 `plugins/fractal.ts` 一致，**不要**写成 `"oc-plus-fractal"`。
+
+2. **默认 agent** 设为双星：
+   ```json
+   "default_agent": "双星"
+   ```
+   > 注意键名是 `default_agent`，不是 `agent`（`agent` 是配置 agent 属性的对象键）。
+
+3. **依赖版本**与 CLI 对齐，编辑 `~/.config/opencode/package.json`：
+   ```json
+   "dependencies": {
+     "@opencode-ai/plugin": "^1.18.3",
+     "@opencode-ai/sdk": "^1.18.3"
+   }
+   ```
+   然后运行 `npm install`（在 `~/.config/opencode/` 目录下）。
+
+4. **环境变量**：
+   ```powershell
+   OPENCODE_EXPERIMENTAL_LSP_TOOL=true
+   OPENCODE_DISABLE_CLAUDE_CODE_PROMPT=1
+   ```
+
+5. 重启 OpenCode。验证方式：`~/.config/opencode/memories/debug.log` 应出现 `[fractal] 模块已导入` 日志行。
 
 ## 推荐安装
 

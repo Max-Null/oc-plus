@@ -1,130 +1,16 @@
 <#-----------------------------------------------------------------------------
-      脚本: deploy.ps1
-        说明: 部署 oc-plus V3.6 agent 定义、命令、技能和分形 Plugin 到 opencode 配置目录
-              MCP 服务器（websearch/gh_grep/context7）直接在 opencode.json 配置，无需外部插件
-        版本: V3.6 | 2026-07-20
-      编码: UTF-8 with BOM
+       script: deploy.ps1
+         desc: oc-plus V3.7 deploy wrapper — invokes Node.js deploy.mjs
+              Node.js cross-platform script solves PowerShell 5.1 CJK encoding failures.
+       version: V3.8 | 2026-07-21
+     encoding: UTF-8 with BOM
   ------------------------------------------------------------------------------#>
 param()
 
 Set-Location $PSScriptRoot
-$OC = "$env:USERPROFILE\.config\opencode"
 
-# 当前活跃的 agent 文件
-$deployments = @(
-    @{ Source = ".\双星系统\agents\双星.md";   TargetDir = "$OC\agents" },
-    @{ Source = ".\双星系统\agents\工匠.md";   TargetDir = "$OC\agents" },
-    @{ Source = ".\双星系统\agents\参谋.md";   TargetDir = "$OC\agents" },
-    @{ Source = ".\双星系统\agents\军师.md";   TargetDir = "$OC\agents" },
-    @{ Source = ".\分形\agents\助理.md";    TargetDir = "$OC\agents" },
-    @{ Source = ".\分形\fractal.ts";       TargetDir = "$OC\plugins" },
-    @{ Source = ".\分形\lib\prompts.ts";   TargetDir = "$OC\plugins\lib" },
-    @{ Source = ".\分形\scripts\memories-cli.mjs"; TargetDir = "$OC\scripts" },
-    @{ Source = ".\分形\scripts\test-analyze.mjs"; TargetDir = "$OC\scripts" },
-    @{ Source = ".\分形\scripts\fractal-cli.mjs"; TargetDir = "$OC\scripts" },
-    @{ Source = ".\agents-priority.ts";           TargetDir = "$OC\plugins" }
-)
+Write-Host "oc-plus V3.8 deploy (wrapper)" -ForegroundColor Cyan
+Write-Host "invoking deploy.mjs...`n"
 
-# 命令文件
-$commandSource = ".\双星系统\commands\*.md"
-$commandTargetDir = "$OC\commands"
-
-# 记忆存储子目录（全局 + 项目级）
-$memoryDirs = @("$OC\memories\blocks", "$OC\memories\triggers", "$PSScriptRoot\.opencode\memories\blocks", "$PSScriptRoot\.opencode\memories\triggers")
-
-# 可定制 prompt 模板目录
-$promptTemplates = @(
-    @{ Source = ".\分形\prompts\core-rules.md";           TargetDir = "$OC\fractal-prompts" },
-    @{ Source = ".\分形\prompts\assertion-reminder.md";   TargetDir = "$OC\fractal-prompts" },
-    @{ Source = ".\分形\prompts\websearch-rules.md";      TargetDir = "$OC\fractal-prompts" }
-)
-
-$deployed = @()
-$skipped = @()
-$failed = @()
-
-Write-Host "===== oc-plus V3.6 部署 =====" -ForegroundColor Cyan
-Write-Host "目标: $OC`n"
-
-# [1/6] 创建目标目录
-Write-Host "[1/6] 创建目录..." -ForegroundColor Yellow
-$requiredDirs = @("$OC\agents", "$OC\commands", "$OC\plugins", "$OC\scripts", "$OC\fractal-prompts") + $memoryDirs
-foreach ($dir in $requiredDirs) {
-    if (-not (Test-Path -LiteralPath $dir)) {
-        try { New-Item -ItemType Directory -Path $dir -Force | Out-Null; Write-Host "  + $dir" }
-        catch { Write-Host "  x $dir - $_" -ForegroundColor Red; $failed += $dir }
-    } else { Write-Host "  . $dir" }
-}
-
-# [2/6] 部署 agent + plugin
-Write-Host "`n[2/6] 部署 agent & plugin..." -ForegroundColor Yellow
-foreach ($item in $deployments) {
-    if (-not (Test-Path -LiteralPath $item.Source)) {
-        Write-Host "  x 源文件不存在: $($item.Source)" -ForegroundColor Red; $skipped += $item.Source; continue
-    }
-    try { Copy-Item -LiteralPath $item.Source -Destination $item.TargetDir -Force; Write-Host "  V $($item.Source)"; $deployed += $item.Source }
-    catch { Write-Host "  x $($item.Source) - $_" -ForegroundColor Red; $failed += $item.Source }
-}
-
-# [3/6] 部署命令
-Write-Host "`n[3/6] 部署命令..." -ForegroundColor Yellow
-$commandFiles = Get-ChildItem -Path $commandSource -ErrorAction SilentlyContinue
-if ($commandFiles.Count -gt 0) {
-    foreach ($cmdFile in $commandFiles) {
-        try { Copy-Item -LiteralPath $cmdFile.FullName -Destination $commandTargetDir -Force; Write-Host "  V $($cmdFile.Name)"; $deployed += $cmdFile.FullName }
-        catch { Write-Host "  x $($cmdFile.Name) - $_" -ForegroundColor Red; $failed += $cmdFile.FullName }
-    }
-} else { Write-Host "  . 无匹配命令" -ForegroundColor DarkGray }
-
-# [4/6] 记忆目录
-Write-Host "`n[4/6] 记忆目录..." -ForegroundColor Yellow
-foreach ($dir in $memoryDirs) {
-    if (-not (Test-Path -LiteralPath $dir)) {
-        try { New-Item -ItemType Directory -Path $dir -Force | Out-Null; Write-Host "  + $dir"; $deployed += $dir }
-        catch { Write-Host "  x $dir - $_" -ForegroundColor Red; $failed += $dir }
-    } else { Write-Host "  . $dir" }
-}
-
-# [5/6] 可定制 prompt 模板
-Write-Host "`n[5/6] 可定制 prompt 模板..." -ForegroundColor Yellow
-foreach ($item in $promptTemplates) {
-    if (-not (Test-Path -LiteralPath $item.Source)) {
-        Write-Host "  x 源文件不存在: $($item.Source)" -ForegroundColor Red; $skipped += $item.Source; continue
-    }
-    try {
-        New-Item -ItemType Directory -Path $item.TargetDir -Force | Out-Null
-        Copy-Item -LiteralPath $item.Source -Destination $item.TargetDir -Force
-        Write-Host "  V $($item.Source)"; $deployed += $item.Source
-    }
-    catch { Write-Host "  x $($item.Source) - $_" -ForegroundColor Red; $failed += $item.Source }
-}
-
-# [6/6] 部署技能
-Write-Host "`n[6/6] 部署技能..." -ForegroundColor Yellow
-$skillSource = ".\技能"
-$skillTargetDir = "$OC\skills"
-New-Item -ItemType Directory -Path $skillTargetDir -Force | Out-Null
-$skillDirs = Get-ChildItem -Path $skillSource -Directory -ErrorAction SilentlyContinue
-if ($skillDirs.Count -gt 0) {
-    foreach ($skillDir in $skillDirs) {
-        $skillTarget = Join-Path $skillTargetDir $skillDir.Name
-        try {
-            # 已存在则跳过，不覆盖用户自己的 skill 修改
-            if (Test-Path -LiteralPath $skillTarget) {
-                Write-Host "  . $($skillDir.Name) (已存在，跳过)"; $skipped += $skillDir.Name
-            } else {
-                Copy-Item -LiteralPath $skillDir.FullName -Destination $skillTarget -Recurse -Force
-                Write-Host "  V $($skillDir.Name)"; $deployed += $skillDir.Name
-            }
-        }
-        catch { Write-Host "  x $($skillDir.Name) - $_" -ForegroundColor Red; $failed += $skillDir.Name }
-    }
-} else { Write-Host "  . 无技能目录" -ForegroundColor DarkGray }
-
-# 摘要
-Write-Host "`n===== 部署完成 =====" -ForegroundColor Cyan
-Write-Host "  成功: $($deployed.Count) | 跳过: $($skipped.Count) | 失败: $($failed.Count)"
-if ($skipped.Count -gt 0) { foreach ($s in $skipped) { Write-Host "    跳过: $s" -ForegroundColor Yellow } }
-if ($failed.Count -gt 0) { foreach ($f in $failed) { Write-Host "    失败: $f" -ForegroundColor Red } }
-Write-Host "`n~/.config/opencode/plugins/ 目录下插件自动发现，无需在 opencode.json plugin 列表中声明。" -ForegroundColor Cyan
-Write-Host "MCP 服务器（websearch/gh_grep/context7）需在 opencode.json 的 mcp 字段手动配置。" -ForegroundColor Yellow
+node deploy.mjs
+exit $LASTEXITCODE

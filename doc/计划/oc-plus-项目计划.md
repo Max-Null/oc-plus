@@ -146,7 +146,7 @@
 
 | # | 待办 | 优先级 | 说明 |
 |---|------|:---:|------|
-| 1 | **opencode.json 模板** | 🔴 | 提供 `opencode.json.example`，含 plugin 列表 + MCP 服务器 + 权限配置。deploy.ps1 检测目标位置无文件时从模板复制 |
+| 1 | **opencode.json 模板** | 🔴→✅ | `opencode.json.example` 已创建，含 plugin + MCP（websearch/github/gh_grep/context7）+ 权限 + 注释。deploy.mjs V3.8 checklist 已加入 MCP 配置步骤（2026-07-21） |
 | 2 | **环境变量检查** | 🟡 | deploy.ps1 增加预检：`OPENCODE_EXPERIMENTAL_LSP_TOOL` + `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT`，未设置时输出 setx 命令 |
 | 3 | **验证 deploy.ps1 完整性** | 🟡 | 在新环境实际运行一次 deploy.ps1，对照差距清单逐项确认 |
 | 4 | **README 新电脑安装指南** | 🟢 | 补充"新电脑从零部署"章节：步骤顺序 + 每步预期结果 |
@@ -164,3 +164,8 @@
 - [x] `doc/知识/omo-slim架构分析.md` 沉淀源码分析结论（2026-07-20）
 - [x] omo-slim 传承技能纳入仓库：6 个 skill 完成去 omo 引用改造，纳入 `技能/omo-*`；agent-skill-creator 改为推荐安装（2026-07-20）
 - [x] deploy.ps1 V3.6：新增技能部署步骤（2026-07-20）
+- [x] deploy.mjs V3.7：Node.js 跨平台部署脚本，替代 deploy.ps1 解决 PowerShell 5.1 中文编码解析失败；新增 pre-deployment cleanup（memories.ts/review-habits.md/.hook-event-*/loop-test.tmp）；新增 post-deploy opencode.json checklist（2026-07-20）
+- [x] deploy.mjs V3.8：checklist 新增 MCP 配置步骤（websearch/github/gh_grep/context7）+ provider API Key 提醒；同步更新 deploy.ps1 版本号（2026-07-21）
+- [x] opencode.json.example：创建模板文件，含完整 mcp 段 + permissions + 各 Key 获取链接注释（2026-07-21）
+- [x] 修复 AGENTS.md / README.md 插件名错误：`"oc-plus-fractal"` → `"fractal"`（必须与文件名一致）|
+- [x] 修复 README.md 默认 agent 键名错误：`"agent"` → `"default_agent"`（OC Schema 中 `agent` 是配置 agent 属性的对象键）|
