@@ -34,4 +34,4 @@ lsp: client.diagnostics/updated
 todo: updated
 tui: prompt.append/command.execute/toast.show
 
-结论：OC Plugin API 不原始——记忆管家只用了 3/16 hook，剩余能力全在 API 里躺着。
+结论：OC Plugin API 不原始——记忆管家只用了 4/16 hook，剩余能力全在 API 里躺着。
