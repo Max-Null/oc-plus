@@ -1,5 +1,7 @@
 # oc-plus 项目计划
 
+> **目标**：在一台全新的 OpenCode 上部署 oc-plus，即可达到当前 OC 的完整使用体验。
+>
 > 状态：进行中 · 最后更新：2026-07-20
 
 ## 一、当前版本概览
@@ -12,7 +14,8 @@
 | 分形 Guardian Agent | V3.4 | ✅ 五条触发线 + 可配阈值 + 关键词注入 + 默认行为 |
 | agents-priority | — | ✅ AGENTS.md 中文规范始终位于 system prompt 最前面 |
 | MCP 服务器 | — | ✅ github / websearch / gh_grep / context7（opencode.json 直配，不依赖外部插件） |
-| 部署脚本 | V3.5 | ✅ 移除 omo-slim 依赖，新增 MCP 配置提醒 |
+| 部署脚本 | V3.6 | ✅ 移除 omo-slim 依赖，新增技能部署步骤 + MCP 配置提醒 |
+| 技能 | — | ✅ 8 个 mxy-* + 6 个 omo-*（omo-slim 传承技能已适配纳入：simplify/codemap/clonedeps/verification-planning/reflect/worktrees）<br>⚠️ agent-skill-creator（111 文件独立项目）改为推荐安装，不纳入仓库 |
 | ACP 上下文精简 | latest | ✅ 已安装，OC 内置压缩已禁用 |
 | AGENTS.md | — | ✅ 持续维护 |
 | CC 规则隔离 | — | ✅ |
@@ -130,6 +133,24 @@
 - [x] 如果 OC 有原生结果通知，双星无需额外处理；只需 prompt 中加一句「task 调用后等待结果自动返回，不要轮询」
 - [ ] 如果 OC 没有，需要 fractal.ts 新增触发线：检测 task 调用→追踪 session→完成后注入提醒
 
+### 3.6 P5 — 一键部署闭环（2026-07-20）
+
+> 目标：在一台全新的 OC 上运行 deploy.ps1 + 两个手动步骤，即可达到当前 OC 的完整使用体验。
+
+#### 3.6.1 已完成
+
+- [x] omo-slim 传承技能纳入仓库：6 个 skill 从 `~/.config/opencode/skills/` 移入 `技能/omo-*`，完成去 omo 引用改造（Orchestrator→主 agent、@librarian→联网查证、omos/→oc-plus/ 等）。agent-skill-creator（111 文件独立开源项目）改为推荐安装
+- [x] deploy.ps1 V3.6：新增 `[6/6] 部署技能` 步骤，自动部署 `技能/` 下全部 skill 目录
+
+#### 3.6.2 待办
+
+| # | 待办 | 优先级 | 说明 |
+|---|------|:---:|------|
+| 1 | **opencode.json 模板** | 🔴 | 提供 `opencode.json.example`，含 plugin 列表 + MCP 服务器 + 权限配置。deploy.ps1 检测目标位置无文件时从模板复制 |
+| 2 | **环境变量检查** | 🟡 | deploy.ps1 增加预检：`OPENCODE_EXPERIMENTAL_LSP_TOOL` + `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT`，未设置时输出 setx 命令 |
+| 3 | **验证 deploy.ps1 完整性** | 🟡 | 在新环境实际运行一次 deploy.ps1，对照差距清单逐项确认 |
+| 4 | **README 新电脑安装指南** | 🟢 | 补充"新电脑从零部署"章节：步骤顺序 + 每步预期结果 |
+
 ---
 
 ## 四、项目基础设施 — 待办
@@ -141,3 +162,5 @@
 - [x] 移除 oh-my-opencode-slim 插件 → 纯净双星评估环境（2026-07-20）
 - [x] MCP 服务器迁移：websearch/gh_grep/context7 从 omo-slim 内置转为 opencode.json 直配（2026-07-20）
 - [x] `doc/知识/omo-slim架构分析.md` 沉淀源码分析结论（2026-07-20）
+- [x] omo-slim 传承技能纳入仓库：6 个 skill 完成去 omo 引用改造，纳入 `技能/omo-*`；agent-skill-creator 改为推荐安装（2026-07-20）
+- [x] deploy.ps1 V3.6：新增技能部署步骤（2026-07-20）

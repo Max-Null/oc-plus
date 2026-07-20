@@ -85,6 +85,16 @@
    ```
 4. 重启 OpenCode
 
+## 推荐安装
+
+以下技能体量较大（独立开源项目），未纳入仓库，建议手动安装：
+
+| 技能 | 说明 | 仓库 | 安装方式 |
+|------|------|------|---------|
+| agent-skill-creator | 从工作流描述创建跨平台 Agent Skill（17 平台兼容，⭐2K） | [FrancyJGLisboa/agent-skill-creator](https://github.com/FrancyJGLisboa/agent-skill-creator) | `npx skills add FrancyJGLisboa/agent-skill-creator`<br>或 `git clone` 到 `~/.config/opencode/skills/agent-skill-creator` |
+
+> 仓库已内置 14 个轻量 skill（`技能/` 目录，`deploy.ps1` 自动部署）。
+
 ## 文档
 
 | 文档 | 说明 |
@@ -114,7 +124,7 @@ oc-plus/
 │   ├── scripts/         CLI 工具（fractal-cli）
 │   ├── archive/         历史版本归档
 │   └── 设计.md          设计文档
-├── 技能/               ← 自定义 skill（mxy- 系列 8 个 + mxy-commit-review）
+├── 技能/               ← 内置 skill：8 个 mxy-* + 6 个 omo-*（deploy.ps1 自动部署）
 ├── doc/                ← 项目文档
 │   ├── 知识/           CC vs OC 对比分析 + API 速查
 │   ├── 设计/           功能设计方案

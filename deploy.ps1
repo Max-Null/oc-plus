@@ -1,9 +1,9 @@
 <#-----------------------------------------------------------------------------
-     脚本: deploy.ps1
-       说明: 部署 oc-plus V3.5 agent 定义、命令和分形 Plugin 到 opencode 配置目录
-             MCP 服务器（websearch/gh_grep/context7）直接在 opencode.json 配置，无需外部插件
-       版本: V3.5 | 2026-07-20
-     编码: UTF-8 with BOM
+      脚本: deploy.ps1
+        说明: 部署 oc-plus V3.6 agent 定义、命令、技能和分形 Plugin 到 opencode 配置目录
+              MCP 服务器（websearch/gh_grep/context7）直接在 opencode.json 配置，无需外部插件
+        版本: V3.6 | 2026-07-20
+      编码: UTF-8 with BOM
   ------------------------------------------------------------------------------#>
 param()
 
@@ -43,11 +43,11 @@ $deployed = @()
 $skipped = @()
 $failed = @()
 
-Write-Host "===== oc-plus V3.0 部署 =====" -ForegroundColor Cyan
+Write-Host "===== oc-plus V3.6 部署 =====" -ForegroundColor Cyan
 Write-Host "目标: $OC`n"
 
-# [1/4] 创建目标目录
-Write-Host "[1/4] 创建目录..." -ForegroundColor Yellow
+# [1/6] 创建目标目录
+Write-Host "[1/6] 创建目录..." -ForegroundColor Yellow
 $requiredDirs = @("$OC\agents", "$OC\commands", "$OC\plugins", "$OC\scripts", "$OC\fractal-prompts") + $memoryDirs
 foreach ($dir in $requiredDirs) {
     if (-not (Test-Path -LiteralPath $dir)) {
@@ -56,8 +56,8 @@ foreach ($dir in $requiredDirs) {
     } else { Write-Host "  . $dir" }
 }
 
-# [2/4] 部署 agent + plugin
-Write-Host "`n[2/4] 部署 agent & plugin..." -ForegroundColor Yellow
+# [2/6] 部署 agent + plugin
+Write-Host "`n[2/6] 部署 agent & plugin..." -ForegroundColor Yellow
 foreach ($item in $deployments) {
     if (-not (Test-Path -LiteralPath $item.Source)) {
         Write-Host "  x 源文件不存在: $($item.Source)" -ForegroundColor Red; $skipped += $item.Source; continue
@@ -66,8 +66,8 @@ foreach ($item in $deployments) {
     catch { Write-Host "  x $($item.Source) - $_" -ForegroundColor Red; $failed += $item.Source }
 }
 
-# [3/4] 部署命令
-Write-Host "`n[3/4] 部署命令..." -ForegroundColor Yellow
+# [3/6] 部署命令
+Write-Host "`n[3/6] 部署命令..." -ForegroundColor Yellow
 $commandFiles = Get-ChildItem -Path $commandSource -ErrorAction SilentlyContinue
 if ($commandFiles.Count -gt 0) {
     foreach ($cmdFile in $commandFiles) {
@@ -76,8 +76,8 @@ if ($commandFiles.Count -gt 0) {
     }
 } else { Write-Host "  . 无匹配命令" -ForegroundColor DarkGray }
 
-# [4/4] 记忆目录
-Write-Host "`n[4/4] 记忆目录..." -ForegroundColor Yellow
+# [4/6] 记忆目录
+Write-Host "`n[4/6] 记忆目录..." -ForegroundColor Yellow
 foreach ($dir in $memoryDirs) {
     if (-not (Test-Path -LiteralPath $dir)) {
         try { New-Item -ItemType Directory -Path $dir -Force | Out-Null; Write-Host "  + $dir"; $deployed += $dir }
@@ -85,8 +85,8 @@ foreach ($dir in $memoryDirs) {
     } else { Write-Host "  . $dir" }
 }
 
-# [5/5] 可定制 prompt 模板
-Write-Host "`n[5/5] 可定制 prompt 模板..." -ForegroundColor Yellow
+# [5/6] 可定制 prompt 模板
+Write-Host "`n[5/6] 可定制 prompt 模板..." -ForegroundColor Yellow
 foreach ($item in $promptTemplates) {
     if (-not (Test-Path -LiteralPath $item.Source)) {
         Write-Host "  x 源文件不存在: $($item.Source)" -ForegroundColor Red; $skipped += $item.Source; continue
@@ -98,6 +98,28 @@ foreach ($item in $promptTemplates) {
     }
     catch { Write-Host "  x $($item.Source) - $_" -ForegroundColor Red; $failed += $item.Source }
 }
+
+# [6/6] 部署技能
+Write-Host "`n[6/6] 部署技能..." -ForegroundColor Yellow
+$skillSource = ".\技能"
+$skillTargetDir = "$OC\skills"
+New-Item -ItemType Directory -Path $skillTargetDir -Force | Out-Null
+$skillDirs = Get-ChildItem -Path $skillSource -Directory -ErrorAction SilentlyContinue
+if ($skillDirs.Count -gt 0) {
+    foreach ($skillDir in $skillDirs) {
+        $skillTarget = Join-Path $skillTargetDir $skillDir.Name
+        try {
+            # 已存在则跳过，不覆盖用户自己的 skill 修改
+            if (Test-Path -LiteralPath $skillTarget) {
+                Write-Host "  . $($skillDir.Name) (已存在，跳过)"; $skipped += $skillDir.Name
+            } else {
+                Copy-Item -LiteralPath $skillDir.FullName -Destination $skillTarget -Recurse -Force
+                Write-Host "  V $($skillDir.Name)"; $deployed += $skillDir.Name
+            }
+        }
+        catch { Write-Host "  x $($skillDir.Name) - $_" -ForegroundColor Red; $failed += $skillDir.Name }
+    }
+} else { Write-Host "  . 无技能目录" -ForegroundColor DarkGray }
 
 # 摘要
 Write-Host "`n===== 部署完成 =====" -ForegroundColor Cyan
