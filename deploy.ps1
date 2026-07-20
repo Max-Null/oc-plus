@@ -1,15 +1,13 @@
 <#-----------------------------------------------------------------------------
-       script: deploy.ps1
-         desc: oc-plus V3.7 deploy wrapper — invokes Node.js deploy.mjs
-              Node.js cross-platform script solves PowerShell 5.1 CJK encoding failures.
-       version: V3.8 | 2026-07-21
+       script: deploy.ps1（部署脚本包装器，版本号仅标识脚本自身迭代）
+       version: V3.9 | 2026-07-21
      encoding: UTF-8 with BOM
   ------------------------------------------------------------------------------#>
 param()
 
 Set-Location $PSScriptRoot
 
-Write-Host "oc-plus V3.8 deploy (wrapper)" -ForegroundColor Cyan
+Write-Host "oc-plus deploy (wrapper) V3.9" -ForegroundColor Cyan
 Write-Host "invoking deploy.mjs...`n"
 
 node deploy.mjs

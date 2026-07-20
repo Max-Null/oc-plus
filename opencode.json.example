@@ -9,9 +9,14 @@
   // ── 插件 ──
   "plugin": [
     "~/.config/opencode/node_modules/superpowers",
+    "opencode-acp@latest",
     "fractal",
     "agents-priority"
   ],
+
+  // ── 禁用 OC 内置压缩（由 opencode-acp 接管）──
+  // ACP 安装命令：opencode plugin opencode-acp@latest --global
+  "compaction": { "auto": false },
 
   // ── 模型提供商 ──
   "provider": {

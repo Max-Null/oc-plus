@@ -1,5 +1,7 @@
 /**
- * oc-plus V3.8 部署脚本（Node.js 跨平台，无编码问题）
+ * oc-plus 部署脚本 V3.9（Node.js 跨平台）
+ * 注意：此版本号仅为部署脚本自身的迭代标识，非 oc-plus 系统版本。
+ *       各组件独立管理版本：双星 V3.7 / 分形 v3.4 / 技能 各自维护。
  *
  * 用法: node deploy.mjs
  * 替代 deploy.ps1，解决 PowerShell 5.1 中文编码解析失败问题。
@@ -153,7 +155,7 @@ function cleanupStaleGlob(dir, globPrefix) {
 // ============================================================
 
 function main() {
-  console.log("===== oc-plus V3.7 部署 (Node.js) =====");
+  console.log("===== oc-plus 部署 V3.9 =====");
   console.log(`目标: ${OC}\n`);
 
   // [0/7] pre-deployment cleanup of deprecated files
@@ -238,12 +240,16 @@ function main() {
   console.log("   获取: https://platform.deepseek.com/api_keys");
   console.log("");
   console.log("2. plugin 数组:");
-  console.log('   ["~/.config/opencode/node_modules/superpowers", "fractal", "agents-priority"]');
+  console.log('   ["~/.config/opencode/node_modules/superpowers", "opencode-acp@latest", "fractal", "agents-priority"]');
   console.log("");
-  console.log("3. default_agent:");
+  console.log("3. 安装 opencode-acp（自适应上下文压缩）:");
+  console.log("   opencode plugin opencode-acp@latest --global");
+  console.log('   同时在 opencode.json 中禁用内置压缩: "compaction": { "auto": false }');
+  console.log("");
+  console.log("4. default_agent:");
   console.log('   "default_agent": "双星"');
   console.log("");
-  console.log("4. MCP 服务器（联网搜索 / 代码搜索 / 文档查询）:");
+  console.log("5. MCP 服务器（联网搜索 / 代码搜索 / 文档查询）:");
   console.log("   复制 opencode.json.example 中的 mcp 段到你的 opencode.json");
   console.log("   包含 4 个 MCP:");
   console.log("   · websearch  — Exa AI 搜索（免费匿名可用，不限额度但有限速）");
@@ -251,10 +257,10 @@ function main() {
   console.log("   · gh_grep    — GitHub 代码全文搜索（无需认证）");
   console.log("   · context7   — 实时库文档（免费 1,000 次/月，无需 Key）");
   console.log("");
-  console.log("5. 权限配置:");
+  console.log("6. 权限配置:");
   console.log("   复制 opencode.json.example 中的 permissions 段");
   console.log("");
-  console.log("6. 环境变量检查:");
+  console.log("7. 环境变量检查:");
   console.log("   OPENCODE_EXPERIMENTAL_LSP_TOOL=true");
   console.log("   OPENCODE_DISABLE_CLAUDE_CODE_PROMPT=1");
   console.log("");
