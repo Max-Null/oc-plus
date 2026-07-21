@@ -49,7 +49,7 @@ interface PluginInput {
 | Permission | `permission.replied`, `permission.updated` |
 | Session | `session.created`, `session.compacted`, `session.deleted`, `session.diff`, `session.error`, `session.idle`, `session.status`, `session.updated` |
 | Shell | `shell.command.*` | ⚠️ OC 1.18.3 实测为 `shell.exec`，非 `shell.command.*` |
-| Tool | `tool.execute.after`, `tool.execute.before` | ❌ OC 1.18.3 实测不触发（v1.17.x 可用） |
+| Tool | `tool.execute.after`, `tool.execute.before` | ⚠️ OC 1.18.3 不触发；1.19+ 触发但各有 bug（见拦截 Hooks 表格备注） |
 | TUI | `tui.prompt.append`, `tui.command.execute`, `tui.toast.show` |
 
 ### 拦截/修改 Hooks
@@ -61,8 +61,8 @@ interface PluginInput {
 | `chat.headers` | LLM 调用前 | ✅ HTTP 头 |
 | `permission.ask` | 权限请求 | ✅ ask/deny/allow |
 | `command.execute.before` | 命令执行前 | ✅ parts |
-| `tool.execute.before` | 工具执行前 | ✅ args |
-| `tool.execute.after` | 工具执行后 | ✅ title, output, metadata |
+| `tool.execute.before` | 工具执行前 | ✅ args | ⚠️ OC 1.18.3 不触发；1.19+ 触发但 args 修改不生效（#31680，PR 修复中） |
+| `tool.execute.after` | 工具执行后 | ✅ title, output, metadata | ⚠️ OC 1.18.3 不触发；1.19+ 本机工具可用的修改生效，MCP 工具的修改被忽略（#21149） |
 | `shell.env` | Shell 启动前 | ✅ 环境变量 |
 
 ### 上下文/压缩 Hooks

@@ -10,7 +10,7 @@
   "plugin": [
     "~/.config/opencode/node_modules/superpowers",
     "opencode-acp@latest",
-    "fractal",
+    // fractal 由 OC 自动发现 ~/.config/opencode/plugins/fractal.ts，无需在此列出
     "agents-priority"
   ],
 

@@ -30,6 +30,7 @@ const SRC = {
   promptTemplates: path.join(__dirname, "分形", "prompts"),
   agentsPriority: path.join(__dirname, "agents-priority.ts"),
   skills: path.join(__dirname, "技能"),
+  fractalSkills: path.join(__dirname, "分形", "技能"),
 };
 
 const DST = {
@@ -217,6 +218,7 @@ function main() {
   // [7/7] deploy skills
   console.log("[7/7] deploying skills...");
   copyDir(SRC.skills, DST.skills, true); // skip existing — don't overwrite user's skill mods
+  copyDir(SRC.fractalSkills, DST.skills, true); // 分形专属技能
   console.log("");
 
   // summary

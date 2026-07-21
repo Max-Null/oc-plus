@@ -26,23 +26,27 @@ function getMarker(): string {
   }
 }
 
-export default {
-  "experimental.chat.system.transform": async (
-    _input: unknown,
-    output: { system: string[] }
-  ) => {
-    if (output.system.length === 0) return;
+export const AgentsPriorityPlugin = async (_input: unknown) => {
+  return {
+    "experimental.chat.system.transform": async (
+      _input: unknown,
+      output: { system: string[] }
+    ) => {
+      if (output.system.length === 0) return;
 
-    const marker = getMarker();
-    const idx = output.system[0].indexOf(marker);
+      const marker = getMarker();
+      const idx = output.system[0].indexOf(marker);
 
-    // idx === -1：没找到 AGENTS.md（异常情况，不动）
-    // idx === 0：AGENTS.md 已经在最前面（不需要动）
-    // idx > 0：AGENTS.md 被其他内容压在下面了，把它挪到最前面
-    if (idx > 0) {
-      const before = output.system[0].substring(0, idx).trimEnd();
-      const agentsAndAfter = output.system[0].substring(idx);
-      output.system[0] = agentsAndAfter + "\n\n" + before;
-    }
-  },
+      // idx === -1：没找到 AGENTS.md（异常情况，不动）
+      // idx === 0：AGENTS.md 已经在最前面（不需要动）
+      // idx > 0：AGENTS.md 被其他内容压在下面了，把它挪到最前面
+      if (idx > 0) {
+        const before = output.system[0].substring(0, idx).trimEnd();
+        const agentsAndAfter = output.system[0].substring(idx);
+        output.system[0] = agentsAndAfter + "\n\n" + before;
+      }
+    },
+  };
 };
+
+export default AgentsPriorityPlugin;
