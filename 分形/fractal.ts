@@ -245,10 +245,10 @@ function getMemoryPaths(projectDir?: string): string[] {
  * 高优先级同名文件覆盖低优先级
  */
 function mergeBlocksAndTriggers(memoryPaths: string[]): {
-  blocks: Array<{ type: string; label: string; description: string; confidence: string; status: string; suggested_status: string; memPathIndex: string; fileName: string; value: string }>;
+  blocks: Array<{ type: string; label: string; description: string; confidence: string; status: string; suggested_status: string; memPathIndex: string; fileName: string; value: string; priority: number; category: string }>;
   triggers: Array<{ type: string; label: string; human_description: string; confidence: string; status: string; suggested_status: string; memPathIndex: string; fileName: string; content: string }>;
 } {
-  const blockMap = new Map<string, { type: string; label: string; description: string; confidence: string; status: string; suggested_status: string; memPathIndex: string; fileName: string; value: string }>();
+  const blockMap = new Map<string, { type: string; label: string; description: string; confidence: string; status: string; suggested_status: string; memPathIndex: string; fileName: string; value: string; priority: number; category: string }>();
   const triggerMap = new Map<string, { type: string; label: string; human_description: string; confidence: string; status: string; suggested_status: string; memPathIndex: string; fileName: string; content: string }>();
 
   // 从低优先级到高优先级遍历
@@ -270,6 +270,8 @@ function mergeBlocksAndTriggers(memoryPaths: string[]): {
             confidence: meta.confidence || "",
             status: meta.status || "pending",
             suggested_status: meta.suggested_status || "suggest",
+            priority: parseInt(meta.priority, 10) || 50,
+            category: meta.category || "reference",
             memPathIndex: String(pathIndex),
             fileName: file,
             value: extractBlockValue(content),
@@ -988,6 +990,83 @@ function saveNoFeedbackState(state: NoFeedbackState) {
 // 触发线 5：提交后知识提取
 // ============================================================
 
+// ---- PageOut 衰减状态 ----
+const DECAY_STATE_FILE = path.join(MEMORIES_DIR, ".decay-state.json");
+const DECAY_DEBOUNCE_MS = 30000; // 30s 防抖——同一条记忆不会在 30s 内被衰减两次
+
+interface DecayState {
+  missedRounds: Record<string, number>;  // label → 连续未命中轮数
+  lastDecayWrite: Record<string, number>; // label → 上次写盘时间戳
+}
+
+function readDecayState(): DecayState {
+  try {
+    if (fs.existsSync(DECAY_STATE_FILE)) {
+      return JSON.parse(fs.readFileSync(DECAY_STATE_FILE, "utf-8"));
+    }
+  } catch { /* */ }
+  return { missedRounds: {}, lastDecayWrite: {} };
+}
+
+function saveDecayState(state: DecayState) {
+  try { fs.writeFileSync(DECAY_STATE_FILE, JSON.stringify(state, null, 2), "utf-8"); } catch { /* */ }
+}
+
+/**
+ * PageOut 衰减：未被召回的记忆按 category 分级降权
+ * - constraint：永不衰减
+ * - reference：连续 10 轮未命中 → priority -5（最低 30）
+ * - preference：连续 5 轮未命中 → priority -10（最低 10）
+ * 写盘带 30s 防抖，避免同一轮多次衰减
+ */
+function decayAndPersist(
+  decayed: Array<{ label: string; memPath: string; category: string }>,
+  memoryPaths: string[],
+) {
+  const state = readDecayState();
+  const now = Date.now();
+
+  for (const d of decayed) {
+    if (d.category === "constraint") continue; // 硬约束永不衰减
+
+    // 递增未命中计数
+    state.missedRounds[d.label] = (state.missedRounds[d.label] || 0) + 1;
+    const missed = state.missedRounds[d.label];
+
+    const threshold = d.category === "preference" ? 5 : 10;
+    const decrement = d.category === "preference" ? 10 : 5;
+    const floor = d.category === "preference" ? 10 : 30;
+
+    if (missed >= threshold) {
+      const lastWrite = state.lastDecayWrite[d.label] || 0;
+      if (now - lastWrite < DECAY_DEBOUNCE_MS) continue; // 防抖
+
+      const mp = memoryPaths[parseInt(d.memPath, 10)] || MEMORIES_DIR;
+      const fpath = path.join(mp, "blocks", d.label + ".md");
+      try {
+        if (fs.existsSync(fpath)) {
+          let content = fs.readFileSync(fpath, "utf-8");
+          // 提取当前 priority
+          const priMatch = content.match(/<!--\s*priority:\s*(\d+)\s*-->/);
+          const oldPri = priMatch ? parseInt(priMatch[1], 10) : 50;
+          const newPri = Math.max(floor, oldPri - decrement);
+          if (newPri < oldPri && priMatch) {
+            // 仅当文件已有 priority 元数据时才回写——避免盲注到错误位置
+            content = content.replace(priMatch[0], `<!-- priority: ${newPri} -->`);
+            fs.writeFileSync(fpath, content, "utf-8");
+            state.lastDecayWrite[d.label] = now;
+            state.missedRounds[d.label] = 0; // 重置计数
+            debug(`DECAY: ${d.label} priority ${oldPri}→${newPri}`);
+          }
+        }
+      } catch (err) {
+        debug(`DECAY: 写盘失败 ${fpath}: ${String(err)}`);
+      }
+    }
+  }
+  saveDecayState(state);
+}
+
 /**
  * 轮询检测新提交 → LLM 提取知识（每轮 system.transform 执行）
  * 通过对比 git log 时间戳与上次检查时间判断是否有新提交
@@ -1226,10 +1305,13 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
       const knowledgeItems = (blocks.filter(b => b.type === "knowledge" && b.status !== "pending") as any[])
         .concat(triggers.filter(t => t.type === "knowledge" && t.status !== "pending") as any[]);
 
-      // ---- A+B：n-gram 提取用户关键词 + 双向匹配（知识关键词→用户消息）-  -
+      // ---- 加权排序 + 四档分层（V3.5）----
+      // 融合 relevance（关键词命中率）+ priority（用户显式权重）+ recency（时间衰减）
       const userMsgLower = (lastUserMessage || "").toLowerCase();
       const userKeywords = lastUserMessage ? extractKeywords(lastUserMessage) : [];
-      const scored: Array<{ item: any; mtime: number; relevance: number }> = [];
+      const now = Date.now();
+      const scored: Array<{ item: any; mtime: number; relevance: number; priority: number; category: string; score: number }> = [];
+      let maxRelevance = 1; // 避免除零
       for (const k of knowledgeItems) {
         const mp = memoryPaths[parseInt((k as any).memPathIndex, 10)] || MEMORIES_DIR;
         const subDir = (k as any).human_description !== undefined ? "triggers" : "blocks";
@@ -1247,46 +1329,123 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
           reverseHits = descKeywords.filter(dk => dk.length >= 2 && userMsgLower.includes(dk)).length;
         }
         const hits = forwardHits + reverseHits;
-        try { scored.push({ item: k, mtime: fs.statSync(fpath).mtimeMs, relevance: hits }); }
-        catch { scored.push({ item: k, mtime: 0, relevance: hits }); }
+        if (hits > maxRelevance) maxRelevance = hits;
+        // mtime 用于 recency 因子（在加权循环中计算）
+        let mtimeMs = 0;
+        try { mtimeMs = fs.statSync(fpath).mtimeMs; } catch { /* */ }
+        scored.push({ item: k, mtime: mtimeMs, relevance: hits, priority: (k as any).priority || 50, category: (k as any).category || "reference", score: 0 });
       }
-      scored.sort((a, b) => {
-        if (b.relevance !== a.relevance) return b.relevance - a.relevance; // 关键词匹配优先
-        return b.mtime - a.mtime; // 同匹配度按最近修改
-      });
-      let topKnowledge = scored.slice(0, MAX_KNOWLEDGE_INJECT);
-      let matchedCount = topKnowledge.filter(s => s.relevance > 0).length;
-      const trimmed = scored.length - topKnowledge.length;
+      // 加权融合（归一化 relevance 后计算）
+      // 权重来源：A-MAC(2603.04549) 结论——category 先验 + 命中率 + 时效性，priority 权重 0.5 是类别内最高单因子
+      for (const s of scored) {
+        const normRel = maxRelevance > 0 ? s.relevance / maxRelevance : 0;
+        s.score = normRel * 0.4 + (s.priority / 100) * 0.5 + Math.exp(-Math.max(0, (now - s.mtime) / (1000 * 60 * 60 * 24)) / 30) * 0.1;
+      }
+      scored.sort((a, b) => b.score - a.score);
 
-      // ---- C：LLM 语义重排（候选 > 3 且有关键词命中时，用 flash 模型精确筛选）----
-      if (matchedCount > 3 && userMsgLower) {
-        const reranked = await llmRerankKnowledge(userMsgLower, topKnowledge);
-        if (reranked) {
-          topKnowledge = reranked;
-          matchedCount = topKnowledge.filter(s => s.relevance > 0).length;
-          debug(`FRACTAL: LLM 重排知识，${reranked.length} 条中 ${matchedCount} 条命中`);
+      // 四档分层
+      const HIGH = scored.filter(s => s.score >= 0.8 || s.priority >= 90 || s.category === "constraint"); // 硬约束保护
+      const IMPORTANT = scored.filter(s => !HIGH.includes(s) && s.score >= 0.6);
+      const OPERATIONAL = scored.filter(s => !HIGH.includes(s) && !IMPORTANT.includes(s) && s.score >= 0.3);
+      const GENERAL = scored.filter(s => !HIGH.includes(s) && !IMPORTANT.includes(s) && !OPERATIONAL.includes(s));
+
+      // 建造预算：HIGH 不参与计数，IMPORTANT + OPERATIONAL + GENERAL
+      const dynamicBudget = Math.max(2, Math.min(MAX_KNOWLEDGE_INJECT, Math.floor((8000 - output.system.join("\n").length / 4) / 800)));
+      let remainingBudget = dynamicBudget;
+      const selected: Array<{ item: any; relevance: number; tier: string }> = [];
+
+      // HIGH 全注入（预算外）
+      for (const s of HIGH) { selected.push({ item: s.item, relevance: s.relevance, tier: "HIGH" }); }
+
+      // IMPORTANT → OPERATIONAL → GENERAL 按预算填充
+      for (const tier of [IMPORTANT, OPERATIONAL, GENERAL]) {
+        for (const s of tier) {
+          if (remainingBudget <= 0) break;
+          selected.push({ item: s.item, relevance: s.relevance, tier: tier === IMPORTANT ? "IMPORTANT" : tier === OPERATIONAL ? "OPERATIONAL" : "GENERAL" });
+          remainingBudget--;
         }
       }
 
-      // 注入 knowledge 索引：关键词命中时立即注入，否则按 nudge 间隔兜底
-      if ((isNudgeTurn || matchedCount > 0) && topKnowledge.length > 0) {
-        const indexLines = topKnowledge.map(({ item: k, relevance }) => {
-          const desc = (k as any).human_description || k.description;
-          const mp = memoryPaths[parseInt((k as any).memPathIndex, 10)] || MEMORIES_DIR;
-          const subDir = (k as any).human_description !== undefined ? "triggers" : "blocks";
-          const filePath = `${mp}/${subDir}/${(k as any).fileName}`.replace(HOME, "~");
-          const tag = relevance > 0 ? " [相关]" : "";
-          return `- **${desc}**${tag} → \`${filePath}\``;
-        });
-        const matchNote = matchedCount > 0
-          ? `（其中 ${matchedCount} 条命中关键词）`
-          : "";
-        const truncationNote = trimmed > 0
-          ? `\n> （共 ${scored.length} 条知识，仅展示 ${topKnowledge.length} 条${matchNote}。其余用 read 工具按需读取）`
-          : "";
-        output.system.push(
-          `\n## 你记录的元知识索引\n以下是你之前记录的元知识摘要。遇到相关话题时，用 read 工具读取完整内容：\n\n${indexLines.join("\n")}${truncationNote}\n`
-        );
+      // LLM 语义重排（候选 > 3 且有关键词命中时）
+      const matchedCount = selected.filter(s => s.relevance > 0).length;
+      let topKnowledge = selected;
+      if (matchedCount > 3 && userMsgLower) {
+        const reranked = await llmRerankKnowledge(userMsgLower, selected.map(s => ({ item: s.item, mtime: 0, relevance: s.relevance })));
+        if (reranked) {
+          // 保留分层信息——LLM 重排后按原顺序重新标记 tier
+          const tierMap = new Map(selected.map(s => [s.item.label || s.item.fileName, s.tier]));
+          topKnowledge = reranked.map(r => ({ item: r.item, relevance: r.relevance, tier: tierMap.get(r.item.label || r.item.fileName) || "GENERAL" }));
+          debug(`FRACTAL: LLM 重排知识，${reranked.length} 条中 ${reranked.filter(r => r.relevance > 0).length} 条命中`);
+        }
+      }
+
+      // 分组推送：同级内共享 ≥1 个 description 关键词的合并
+      const tierPrefixes: Record<string, string> = { HIGH: "🔴", IMPORTANT: "🟡", OPERATIONAL: "🟢", GENERAL: "" };
+      const pushGroups: Array<{ tier: string; lines: string[] }> = [];
+      let lastMergedDesc = ""; // 追踪组内最后一个项的 description，用于关键词比对
+
+      for (const s of topKnowledge) {
+        const k = s.item;
+        const desc = (k as any).human_description || k.description;
+        const mp = memoryPaths[parseInt((k as any).memPathIndex, 10)] || MEMORIES_DIR;
+        const subDir = (k as any).human_description !== undefined ? "triggers" : "blocks";
+        const filePath = `${mp}/${subDir}/${(k as any).fileName}`.replace(HOME, "~");
+        const tag = s.relevance > 0 ? " [相关]" : "";
+        const line = `- **${desc}**${tag} → \`${filePath}\``;
+
+        // 尝试合入上一组（同 tier 且与组内最后一条共享关键词）
+        const lastGroup = pushGroups.length > 0 ? pushGroups[pushGroups.length - 1] : null;
+        const descKeywords = extractKeywords(desc);
+        const lastKeywords = lastGroup ? extractKeywords(lastMergedDesc) : [];
+        const shared = descKeywords.filter(dk => lastKeywords.includes(dk)).length;
+
+        if (lastGroup && lastGroup.tier === s.tier && shared >= 2) {
+          lastGroup.lines.push(line);
+          lastMergedDesc = desc;
+        } else {
+          pushGroups.push({ tier: s.tier, lines: [line] });
+          lastMergedDesc = desc;
+        }
+      }
+
+      // 注入分组知识索引
+      if ((isNudgeTurn || matchedCount > 0) && pushGroups.length > 0) {
+        const truncated = scored.length - topKnowledge.length;
+        const prefixMap: Record<string, string> = { HIGH: "🔴 硬约束（不受截断保护外的预算限制）", IMPORTANT: "🟡 重要知识", OPERATIONAL: "🟢 参考知识", GENERAL: "其他知识" };
+
+        for (const group of pushGroups) {
+          const label = prefixMap[group.tier] || group.tier;
+          output.system.push(`\n### ${label}\n${group.lines.join("\n")}\n`);
+        }
+        if (truncated > 0) {
+          output.system.push(`\n> （共 ${scored.length} 条知识，已按权重分层注入 ${topKnowledge.length} 条。其余用 read 工具按需读取）\n`);
+        }
+      }
+
+      // ---- PageOut 衰减：注入集会中的命中项重置计数，未入选的递增累计 ----
+      {
+        const injectedLabels = new Set(topKnowledge.map(s => (s.item as any).label || (s.item as any).fileName));
+        const decayState = readDecayState();
+        // 命中项：重置计数
+        for (const label of injectedLabels) {
+          if (decayState.missedRounds[label]) decayState.missedRounds[label] = 0;
+        }
+        // 未入选项：构建衰减列表
+        const decayCandidates: Array<{ label: string; memPath: string; category: string }> = [];
+        for (const s of scored) {
+          const label = (s.item as any).label || (s.item as any).fileName;
+          if (!injectedLabels.has(label)) {
+            decayCandidates.push({
+              label,
+              memPath: (s.item as any).memPathIndex || "0",
+              category: (s.item as any).category || "reference",
+            });
+          }
+        }
+        saveDecayState(decayState);
+        if (decayCandidates.length > 0) {
+          decayAndPersist(decayCandidates, memoryPaths);
+        }
       }
 
       // 注入 auto habits（已确认的习惯，仅 nudge turn 注入）
@@ -1312,7 +1471,7 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
 
       if (triggers.length > 0) {
         const skipped = (!isNudgeTurn && matchedCount === 0) ? " (间隔跳过注入)" : (!isNudgeTurn && matchedCount > 0 ? ` (关键词命中${matchedCount}条，立即注入)` : "");
-        const trimInfo = trimmed > 0 ? ` 截断${trimmed}条` : "";
+        const trimInfo = scored.length > topKnowledge.length ? ` 截断${scored.length - topKnowledge.length}条` : "";
         const matchInfo = matchedCount > 0 ? ` 命中${matchedCount}条` : "";
         debug(`FRACTAL: 注入 ${autoHabits.length} 个已确认 + ${suggestHabits.length} 个观察中 + ${knowledgeItems.length} 个元知识→展示${topKnowledge.length}${matchInfo}${trimInfo}${skipped}`);
       }
@@ -1354,6 +1513,9 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
           saveNoFeedbackState(nfs);
         }
       }
+
+      // 中文思考：独立 system message，最高 recency，不受 core-rules 大块稀释
+      output.system.push("\n以中文思考，除非用户要求，否则回答也使用中文。\n");
     },
 
     /**

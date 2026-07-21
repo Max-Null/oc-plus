@@ -207,6 +207,8 @@ AGENTS.md 内容分两类，分类依据是**文本特征**（不是语义判断
 ```markdown
 <!-- type: knowledge -->
 <!-- label: 标签名（用于系统去重，缺省时用文件名） -->
+<!-- priority: 1-100（缺省 50） -->
+<!-- category: constraint | reference | preference（缺省 reference） -->
 <!-- status: auto -->
 <!-- description: 关键词1 | 关键词2 | 关键词3 -->
 <!-- confidence: high | medium | low（可选） -->
@@ -222,6 +224,7 @@ AGENTS.md 内容分两类，分类依据是**文本特征**（不是语义判断
 硬约束：
 - 正文 ≤ 15 行
 - 必填元数据：`type` / `label` / `status` / `description`
+- **新增**：`priority`（1-100）和 `category`（constraint/reference/preference）控制注入权重与衰减
 - `description` 用 `|` 分隔的关键词指纹，不用自然语言摘要
 - 正文结构用加粗标记：`**事实**：` `**原则**：` `**反例**：` `**结论**：`
 - 分形 `parseMeta` 仅解析前 150 字符，元数据行不宜过长

@@ -74,9 +74,11 @@ export default { id: "xx", server: async (input) => { return hooks } }
 
 ## 自动发现
 
-- `~/.config/opencode/plugins/*.ts` — 全局，启动时自动加载
-- `.opencode/plugins/*.ts` — 项目级，启动时自动加载
-- `opencode.json` 的 `plugin` 数组中写的是 **npm 包名或 `file://` URL**（1.18 中 `file://` 不再有效，仅 npm 包名可用）
+> ⚠️ **1.18.3 Windows 实测：自动发现已失效。** 仅 npm 包可用。详见坑 9。
+
+- `~/.config/opencode/plugins/*.ts` — 全局，启动时自动加载（1.17.x ✅，1.18.3 Windows ❌）
+- `.opencode/plugins/*.ts` — 项目级，启动时自动加载（1.17.x ✅，1.18.3 Windows ❌）
+- `opencode.json` 的 `plugin` 数组中写的是 **npm 包名**（1.18.3 `file://` 也失效）
 - ACP 已集成：与分形触发线分工明确（ACP 管压缩，分形管决策质量），推荐配置见文档
 
 ## 踩坑记录
@@ -137,7 +139,23 @@ plugins/
 
 **现象**：`opencode.json` 的 `plugin` 数组中写 `"file:///C:/Users/.../plugins/xxx.ts"` 不加载  
 **根因**：OC 1.18 的 `resolvePluginTarget` 可能不处理本地 `file://` URL，或处理失败时静默跳过  
-**替代方案**：依赖自动发现（放在 `plugins/` 目录）或发布为 npm 包
+**替代方案**：发布为 npm 包。
+
+### 坑 9：OC 1.18.3 Windows 本地插件全部失效
+
+**现象**：`~/.config/opencode/plugins/*.ts` / `*.js` 自动发现不工作；`.opencode/plugins/*` 项目级也不工作；`file://` URL 不工作；npm 包正常（`opencode-acp@latest` 可加载）。
+
+**验证手段**（2026-07-21 实测）：
+1. 零依赖 JS 插件 `test-js.js` 放 `plugins/` 目录 — 不加载 ✗
+2. `.opencode/plugins/test-js.js` 项目级 — 不加载 ✗
+3. `file:///C:/Users/.../plugins/test-plugin.ts` in plugin array — 不加载 ✗
+4. `opencode-acp@latest` npm 包 — 正常加载 ✓
+
+**结论**：OC 1.18.3 Windows 版仅支持 npm 包插件。本地开发必须走 npm 包路径——创建 `package.json` 或发布到 registry。
+
+**替代方案**：
+- 开发阶段用 `npm link` 或 `file:` 依赖安装到 `~/.config/opencode/node_modules/`
+- 正式使用发布到 npm registry
 
 ## ACP 集成建议
 

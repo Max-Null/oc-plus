@@ -87,9 +87,14 @@ function copyFile(src, destDir, label) {
   }
 }
 
-function copyDir(srcDir, destDir, skipExisting = true) {
+/**
+ * 拷贝目录，skipExisting 控制策略：
+ *   true  → 目标已存在时检查文件时间戳，源更新则覆盖（保护用户修改 + 允许项目升级）
+ *   false → 无条件覆盖
+ */
+function copyDir(srcDir, destDir, skipExisting = true, label = "") {
   if (!fs.existsSync(srcDir)) {
-    log(".", `${path.basename(srcDir)} (源目录不存在)`);
+    log(".", `${label || path.basename(srcDir)} (源目录不存在)`);
     return;
   }
   ensureDir(destDir);
@@ -99,17 +104,21 @@ function copyDir(srcDir, destDir, skipExisting = true) {
     const dest = path.join(destDir, entry.name);
     if (entry.isDirectory()) {
       if (skipExisting && fs.existsSync(dest)) {
-        log(".", `${entry.name} (已存在，跳过)`);
-        stats.skipped.push(entry.name);
+        // 目录存在 → 递归进入，逐文件比较时间戳
+        copyDir(src, dest, true, entry.name);
       } else {
         copyDirRecursive(src, dest, entry.name, skipExisting);
       }
     } else {
-      if (!skipExisting || !fs.existsSync(dest)) {
+      const shouldCopy = skipExisting
+        ? (!fs.existsSync(dest) || fs.statSync(src).mtimeMs > fs.statSync(dest).mtimeMs)
+        : true;
+      if (shouldCopy) {
+        const action = fs.existsSync(dest) ? "U" : "V"; // U=更新覆盖, V=新建
         try {
           fs.copyFileSync(src, dest);
           stats.deployed.push(entry.name);
-          log("V", entry.name);
+          log(action, entry.name);
         } catch (e) {
           log("x", `${entry.name} — ${e.message}`);
           stats.failed.push(entry.name);

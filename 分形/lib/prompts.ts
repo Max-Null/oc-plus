@@ -17,6 +17,8 @@ export function getSystemPrompt(): string {
 <!-- type: habit | knowledge -->
 <!-- label: 标签名 -->
 <!-- description: 简短描述（给 LLM 看） -->
+<!-- priority: 1-100（权重，缺省 50。硬约束 90+、参考知识 50-70、软偏好 30-40） -->
+<!-- category: constraint | reference | preference（缺省 reference） -->
 <!-- confidence: high | medium | low -->
 <!-- confidence_reason: 置信度判断依据（一句话） -->
 <!-- status: pending | suggest | auto -->
@@ -136,6 +138,8 @@ confidence 级别：
       "confidence_level": "high | medium | low（新建时必填，更新已有文件时省略）",
       "confidence_reason": "置信度判断依据（新建时必填，更新已有文件时省略）",
       "suggested_status": "suggest | auto（新建时必填，更新已有文件时省略）",
+      "priority": "1-100 权重值（新建时必填）。硬约束 90+、参考知识 50-70、软偏好 30-40",
+      "category": "constraint | reference | preference（新建时必填，缺省 reference）",
       "reason": "为什么做这个操作（一句话）"
     }
   ],
