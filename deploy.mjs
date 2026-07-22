@@ -41,6 +41,7 @@ const DST = {
   scripts: path.join(OC, "scripts"),
   fractalPrompts: path.join(OC, "fractal-prompts"),
   skills: path.join(OC, "skills"),
+  plans: path.join(OC, "plans"),
   memoriesBlocks: path.join(OC, "memories", "blocks"),
   memoriesTriggers: path.join(OC, "memories", "triggers"),
   projectMemoriesBlocks: path.join(__dirname, ".opencode", "memories", "blocks"),
@@ -183,6 +184,7 @@ function main() {
     ensureDir(d);
   }
   ensureDir(path.join(OC, "memories")); // top-level memories dir (blocks/triggers already in DST)
+  ensureDir(DST.plans);
   console.log("");
 
   // [2/7] deploy agents

@@ -63,6 +63,7 @@ const LAST_ANALYSIS = path.join(MEMORIES_DIR, "last-analysis.json");
 const PAUSE_PREFIX = path.join(MEMORIES_DIR, ".fractal-pause-"); // /fractal pause <n> 标志文件前缀
 const LEARN_FLAG = path.join(MEMORIES_DIR, ".fractal-learn-flag.json"); // /fractal learn 触发标志
 const PROMPT_DIR = path.join(OC_CONFIG, "fractal-prompts"); // 可定制 prompt 模板目录
+const PLANS_DIR = path.join(OC_CONFIG, "plans"); // 计划文档目录
 
 const ANALYSIS_THRESHOLD = 20; // 累积 N 条事件后触发分析
 const MAX_EVENTS_FOR_ANALYSIS = 200;
@@ -226,6 +227,89 @@ function extractKeywords(text: string): string[] {
     }
   }
   return [...new Set(keywords)];
+}
+
+/** 读取 plans/ 目录下所有未完成的计划文件，提取摘要，同时同步 .active.json */
+function getActivePlanSummaries(): string[] {
+  try {
+    if (!fs.existsSync(PLANS_DIR)) return [];
+    const files = fs.readdirSync(PLANS_DIR).filter(f => f.endsWith(".md"));
+    if (files.length === 0) return [];
+
+    const summaries: string[] = [];
+    const activePlans: Array<{
+      file: string;
+      title: string;
+      progress: string;
+      lastCompletedStep: string;
+      lastActive: string;
+    }> = [];
+
+    for (const f of files) {
+      const content = safeReadFile(path.join(PLANS_DIR, f));
+      if (!content) continue;
+
+      // 跳过已标记为「已完成」的计划
+      if (/状态[：:]\s*(已完成|完成|done)/i.test(content)) continue;
+
+      // 统计 checkbox 进度：- [x] vs - [ ]
+      const lines = content.split("\n");
+      let completed = 0, total = 0;
+      let lastCompletedText = "";
+      for (const line of lines) {
+        if (/^\s*-\s+\[x\]/i.test(line)) {
+          completed++; total++;
+          lastCompletedText = line.replace(/^\s*-\s+\[x\]\s*/i, "").trim();
+        } else if (/^\s*-\s+\[ \]/i.test(line)) { total++; }
+      }
+      const progressStr = total > 0 ? ` · ${completed}/${total} 完成` : "";
+
+      // 提取标题和摘要
+      let title = f.replace(".md", "");
+      let summary = "";
+      for (const line of lines) {
+        if (line.startsWith("# ") && title === f.replace(".md", "")) {
+          title = line.replace("# ", "").trim();
+          continue;
+        }
+        if (line.startsWith("## ")) {
+          if (summary) break;
+        }
+        const trimmed = line.trim();
+        if (trimmed && !trimmed.startsWith("#") && !trimmed.startsWith(">") && trimmed.length > 5) {
+          summary = trimmed;
+          break;
+        }
+      }
+
+      // 摘要限制长度，避免撑破 prompt 行
+      const shortSummary = summary.length > 60 ? summary.slice(0, 60) + "…" : summary;
+      summaries.push(`- **${title}**（${f}${progressStr}）：${shortSummary}`);
+
+      // 构建 .active.json 记录
+      activePlans.push({
+        file: f,
+        title,
+        progress: completed > 0 || total > 0 ? `${completed}/${total}` : "?/?",
+        lastCompletedStep: lastCompletedText,
+        lastActive: new Date().toISOString(),
+      });
+    }
+
+    // 同步写入 .active.json（供 GUI 和跨会话恢复使用）
+    try {
+      fs.writeFileSync(
+        path.join(PLANS_DIR, ".active.json"),
+        JSON.stringify({ activePlans, updatedAt: new Date().toISOString() }, null, 2),
+        "utf-8"
+      );
+    } catch { /* 写入失败静默 */ }
+
+    return summaries;
+  } catch (e) {
+    debug(`读取 plans 目录失败: ${e}`);
+    return [];
+  }
 }
 
 /**
@@ -1669,6 +1753,18 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
 
       // 中文思考：独立 system message，最高 recency，不受 core-rules 大块稀释
       output.system.push("\n以中文思考，除非用户要求，否则回答也使用中文。\n");
+
+      // === 计划文档锚点注入（每轮都注入，与知识注入不同——这是导航信息） ===
+      const plans = getActivePlanSummaries();
+      if (plans.length > 0) {
+        const planSection = [
+          "\n## 📋 当前计划",
+          ...plans,
+          plans.length > 1 ? "\n> 多个计划并行时，优先完成当前正在执行的那个。" : ""
+        ].join("\n");
+        output.system.push(planSection);
+        debug(`注入 ${plans.length} 个计划摘要`);
+      }
     },
 
     /**

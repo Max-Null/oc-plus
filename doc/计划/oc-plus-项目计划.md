@@ -151,6 +151,16 @@
 | 3 | **验证 deploy.ps1 完整性** | 🟡 | 在新环境实际运行一次 deploy.ps1，对照差距清单逐项确认 |
 | 4 | **README 新电脑安装指南** | 🟢 | 补充"新电脑从零部署"章节：步骤顺序 + 每步预期结果 |
 
+### 3.7 P6 — 计划文档机制（✅ 已完成 2026-07-22）
+
+> 对标 CC Plan Mode：复杂任务执行前先持久化计划到 `~/.config/opencode/plans/`，防止上下文压缩后执行漂移。
+
+- [x] 双星 prompt 增加阶段 2 规格持久化约束 + 计划文档对照规则 + 待办列表互补说明
+- [x] 分形 core-rules.md 增加「计划文档规则」段落
+- [x] 分形 fractal.ts 新增 `getActivePlanSummaries()` → system.transform 每轮注入活跃计划摘要
+- [x] deploy.mjs 新增 plans 目录创建
+- [x] `doc/设计/计划文档机制-设计方案.md` 设计方案文档
+
 ---
 
 ## 四、项目基础设施 — 待办
