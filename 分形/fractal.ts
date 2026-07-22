@@ -1,5 +1,5 @@
 /**
- * 分形 Plugin for OpenCode — v3.4
+ * 分形 Plugin for OpenCode — v3.5
  *
  * 五条触发线 Guardian Agent：
  * - 触发线 1：文件写入匹配 trigger（glob→LLM→prompt）
@@ -229,6 +229,52 @@ function extractKeywords(text: string): string[] {
 }
 
 /**
+ * 注入层去重（V3.5）：关键词重叠率判断，避免同习惯的多个 pending 副本同轮反复提示
+ *
+ * 对 pending items 逐一提取关键词，Jaccard 重叠率 ≥ 0.5 → 视为重复。
+ * 前置排序确保 priority 高的 item 优先通过（低 priority 的被过滤）。
+ * 用于 block（descKey="description"）和 trigger（descKey="human_description"）。
+ */
+function deduplicatePendingByKeywords<T extends Record<string, any>>(
+  items: T[],
+  descKey: string
+): T[] {
+  if (items.length <= 1) return items;
+  // 按 priority 降序排序，确保优先级高的先被处理（高优先保留，低优先丢弃）
+  const sorted = [...items].sort((a, b) => ((b as any).priority ?? 50) - ((a as any).priority ?? 50));
+  const kept: T[] = [];
+  const keptKeywordSets: Set<string>[] = [];
+
+  for (const item of sorted) {
+    const desc = (item[descKey] || "") as string;
+    if (!desc) { kept.push(item); continue; }  // 无描述时不做去重（安全兜底）
+    const keywords = extractKeywords(desc);
+    if (keywords.length === 0) { kept.push(item); continue; }
+
+    let isDuplicate = false;
+    for (const existing of keptKeywordSets) {
+      // Jaccard 相似度：|A ∩ B| / |A ∪ B|
+      const intersection = keywords.filter(k => existing.has(k)).length;
+      const union = new Set([...existing, ...keywords]).size;
+      const overlap = union > 0 ? intersection / union : 0;
+      if (overlap >= 0.5) {
+        isDuplicate = true;
+        break;
+      }
+    }
+
+    if (!isDuplicate) {
+      kept.push(item);
+      keptKeywordSets.push(new Set(keywords));
+    } else {
+      debug(`DEDUP: 注入层去重，跳过 "${desc.slice(0, 40)}"（与已有 pending 关键词重叠率≥50%→被忽略）`);
+    }
+  }
+
+  return kept;
+}
+
+/**
  * 获取三层记忆路径
  * 优先级（同名项覆盖）：共享项目级 > 个人项目级 > 全局
  */
@@ -269,53 +315,44 @@ function mergeBlocksAndTriggers(memoryPaths: string[]): {
   // 从低优先级到高优先级遍历
   for (let pathIndex = 0; pathIndex < memoryPaths.length; pathIndex++) {
     const memPath = memoryPaths[pathIndex];
-    // 读取 blocks/
-    const blocksDir = path.join(memPath, "blocks");
-    if (fs.existsSync(blocksDir)) {
-      const files = fs.readdirSync(blocksDir).filter(f => f.endsWith(".md"));
-      for (const file of files) {
-        const content = safeReadFile(path.join(blocksDir, file));
-        const meta = parseMeta(content, 150);
-        if (meta) {
-          const label = meta.label || file.replace(".md", "");
-          blockMap.set(label, {
-            type: meta.type || "habit",
-            label,
-            description: meta.description || "",
-            confidence: meta.confidence || "",
-            status: meta.status || "pending",
-            suggested_status: meta.suggested_status || "suggest",
-            priority: parseInt(meta.priority, 10) || 50,
-            category: meta.category || "reference",
-            memPathIndex: String(pathIndex),
-            fileName: file,
-            value: extractBlockValue(content),
-          });
-        }
+
+    // 读取 blocks/（兼容旧 flat + 新分子目录）
+    for (const entry of readBlocksDir(path.join(memPath, "blocks"))) {
+      const meta = parseMeta(entry.content, 400);
+      if (meta) {
+        const label = meta.label || entry.fileName.replace(".md", "");
+        blockMap.set(label, {
+          type: meta.type || "habit",
+          label,
+          description: meta.description || "",
+          confidence: meta.confidence || "",
+          status: meta.status || "pending",
+          suggested_status: meta.suggested_status || "suggest",
+          priority: parseInt(meta.priority, 10) || 50,
+          category: meta.category || "reference",
+          memPathIndex: String(pathIndex),
+          fileName: entry.fileName,
+          value: extractBlockValue(entry.content),
+        });
       }
     }
 
-    // 读取 triggers/
-    const triggersDir = path.join(memPath, "triggers");
-    if (fs.existsSync(triggersDir)) {
-      const files = fs.readdirSync(triggersDir).filter(f => f.endsWith(".md"));
-      for (const file of files) {
-        const content = safeReadFile(path.join(triggersDir, file));
-        const meta = parseMeta(content, 400);
-        if (meta) {
-          const label = meta.label || file.replace(".md", "");
-          triggerMap.set(label, {
-            type: meta.type || "habit",
-            label,
-            human_description: meta.human_description || "",
-            confidence: meta.confidence || "",
-            status: meta.status || "pending",
-            suggested_status: meta.suggested_status || "suggest",
-            memPathIndex: String(pathIndex),
-            fileName: file,
-            content: extractTriggerContent(content),
-          });
-        }
+    // 读取 triggers/（兼容旧 flat + 新分子目录）
+    for (const entry of readTriggersDir(path.join(memPath, "triggers"))) {
+      const meta = parseMeta(entry.content, 400);
+      if (meta) {
+        const label = meta.label || entry.fileName.replace(".md", "");
+        triggerMap.set(label, {
+          type: meta.type || "habit",
+          label,
+          human_description: meta.human_description || "",
+          confidence: meta.confidence || "",
+          status: meta.status || "pending",
+          suggested_status: meta.suggested_status || "suggest",
+          memPathIndex: String(pathIndex),
+          fileName: entry.fileName,
+          content: extractTriggerContent(entry.content),
+        });
       }
     }
   }
@@ -324,6 +361,108 @@ function mergeBlocksAndTriggers(memoryPaths: string[]): {
     blocks: Array.from(blockMap.values()),
     triggers: Array.from(triggerMap.values()),
   };
+}
+
+// ============================================================
+// V3.5 分子目录：blocks/<status>/ 和 triggers/<status>/
+// 兼容旧 flat 结构，新写入一律走子目录
+// ============================================================
+
+/** 合法的 status 子目录名 */
+const STATUS_DIRS = ["pending", "auto", "suggest"];
+
+/** status → 子目录名映射，非标准 status 返回空串（flat 结构） */
+function getStatusSubDir(status: string): string {
+  return STATUS_DIRS.includes(status) ? status : "";
+}
+
+/**
+ * 读取 blocks 目录（兼容旧 flat + 新 status 子目录）
+ * 返回 { fileName, content, relPath } — relPath 用于 LLM prompt 中的相对路径展示
+ */
+function readBlocksDir(blocksDir: string): Array<{ fileName: string; content: string; relPath: string }> {
+  const results: Array<{ fileName: string; content: string; relPath: string }> = [];
+  // 向后兼容：旧 flat 结构 blocks/*.md
+  if (fs.existsSync(blocksDir)) {
+    for (const entry of fs.readdirSync(blocksDir, { withFileTypes: true })) {
+      if (entry.isFile() && entry.name.endsWith(".md")) {
+        results.push({ fileName: entry.name, content: safeReadFile(path.join(blocksDir, entry.name)), relPath: entry.name });
+      }
+    }
+  }
+  // 新结构：blocks/<status>/*.md
+  for (const sub of STATUS_DIRS) {
+    const subDir = path.join(blocksDir, sub);
+    if (fs.existsSync(subDir)) {
+      for (const entry of fs.readdirSync(subDir, { withFileTypes: true })) {
+        if (entry.isFile() && entry.name.endsWith(".md")) {
+          results.push({ fileName: entry.name, content: safeReadFile(path.join(subDir, entry.name)), relPath: `${sub}/${entry.name}` });
+        }
+      }
+    }
+  }
+  return results;
+}
+
+/** 读取 triggers 目录（同上） */
+function readTriggersDir(triggersDir: string): Array<{ fileName: string; content: string; relPath: string }> {
+  const results: Array<{ fileName: string; content: string; relPath: string }> = [];
+  if (fs.existsSync(triggersDir)) {
+    for (const entry of fs.readdirSync(triggersDir, { withFileTypes: true })) {
+      if (entry.isFile() && entry.name.endsWith(".md")) {
+        results.push({ fileName: entry.name, content: safeReadFile(path.join(triggersDir, entry.name)), relPath: entry.name });
+      }
+    }
+  }
+  for (const sub of STATUS_DIRS) {
+    const subDir = path.join(triggersDir, sub);
+    if (fs.existsSync(subDir)) {
+      for (const entry of fs.readdirSync(subDir, { withFileTypes: true })) {
+        if (entry.isFile() && entry.name.endsWith(".md")) {
+          results.push({ fileName: entry.name, content: safeReadFile(path.join(subDir, entry.name)), relPath: `${sub}/${entry.name}` });
+        }
+      }
+    }
+  }
+  return results;
+}
+
+/**
+ * 根据内容中的 status 元数据决定写入子目录，返回完整文件路径
+ * 自动创建目录（无副作用）
+ */
+function resolveWritePath(basePath: string, category: "blocks" | "triggers", fileName: string, content: string): string {
+  const meta = parseMeta(content, 400);
+  const status = meta?.status || "pending";
+  const subDir = getStatusSubDir(status);
+  const dir = subDir ? path.join(basePath, category, subDir) : path.join(basePath, category);
+  ensureDir(dir);
+  return path.join(dir, fileName);
+}
+
+/**
+ * 在 blocks 目录中查找已有文件（先子目录后 flat）
+ * 用于 update / decay 等需要定位已有文件的操作
+ */
+function findBlockFile(basePath: string, fileName: string): string | null {
+  for (const sub of STATUS_DIRS) {
+    const p = path.join(basePath, "blocks", sub, fileName);
+    if (fs.existsSync(p)) return p;
+  }
+  const flat = path.join(basePath, "blocks", fileName);
+  return fs.existsSync(flat) ? flat : null;
+}
+
+/**
+ * 在 triggers 目录中查找已有文件
+ */
+function findTriggerFile(basePath: string, fileName: string): string | null {
+  for (const sub of STATUS_DIRS) {
+    const p = path.join(basePath, "triggers", sub, fileName);
+    if (fs.existsSync(p)) return p;
+  }
+  const flat = path.join(basePath, "triggers", fileName);
+  return fs.existsSync(flat) ? flat : null;
 }
 
 /**
@@ -506,17 +645,11 @@ async function analyzeAndUpdate(eventLines: string[], memoryPaths: string[]): Pr
   const existingBlocks: string[] = [];
   const existingTriggers: string[] = [];
   for (const memPath of memoryPaths) {
-    const blocksDir = path.join(memPath, "blocks");
-    if (fs.existsSync(blocksDir)) {
-      for (const f of fs.readdirSync(blocksDir).filter(f => f.endsWith(".md"))) {
-        existingBlocks.push(`文件: blocks/${f}\n${safeReadFile(path.join(blocksDir, f)).slice(0, 500)}`);
-      }
+    for (const entry of readBlocksDir(path.join(memPath, "blocks"))) {
+      existingBlocks.push(`文件: blocks/${entry.relPath}\n${entry.content.slice(0, 500)}`);
     }
-    const triggersDir = path.join(memPath, "triggers");
-    if (fs.existsSync(triggersDir)) {
-      for (const f of fs.readdirSync(triggersDir).filter(f => f.endsWith(".md"))) {
-        existingTriggers.push(`文件: triggers/${f}\n${safeReadFile(path.join(triggersDir, f)).slice(0, 500)}`);
-      }
+    for (const entry of readTriggersDir(path.join(memPath, "triggers"))) {
+      existingTriggers.push(`文件: triggers/${entry.relPath}\n${entry.content.slice(0, 500)}`);
     }
   }
 
@@ -678,15 +811,14 @@ function applyAnalysisResult(resultJson: string, memoryPaths: string[]) {
     }
     const basePath = memoryPaths[pathIndex];
 
-    let targetDir: string;
+    // V3.5 分子目录：根据 content 中的 status 决定写入子目录
+    let category: "blocks" | "triggers";
     if (action.type.startsWith("create_trigger") || action.type.startsWith("update_trigger")) {
-      targetDir = path.join(basePath, "triggers");
+      category = "triggers";
     } else {
-      targetDir = path.join(basePath, "blocks");
+      category = "blocks";
     }
-
-    ensureDir(targetDir);
-    const filePath = path.join(targetDir, action.file);
+    const filePath = resolveWritePath(basePath, category, action.file, action.content);
 
     try {
       fs.writeFileSync(filePath, action.content, "utf-8");
@@ -761,15 +893,11 @@ function matchFileTriggers(filePath: string, projectDir?: string): {
 } | null {
   const memoryPaths = getMemoryPaths(projectDir);
   for (const memPath of memoryPaths) {
-    const triggersDir = path.join(memPath, "triggers");
-    if (!fs.existsSync(triggersDir)) continue;
     try {
-      const files = fs.readdirSync(triggersDir).filter(f => f.endsWith(".md"));
-      for (const file of files) {
-        const content = safeReadFile(path.join(triggersDir, file));
+      for (const entry of readTriggersDir(path.join(memPath, "triggers"))) {
         // 仅匹配 auto 状态的 trigger
-        if (!content.includes("status: auto")) continue;
-        const parsed = parseTriggerFile(content);
+        if (!entry.content.includes("status: auto")) continue;
+        const parsed = parseTriggerFile(entry.content);
         if (!parsed) continue;
 
         // 检查 exclude 优先
@@ -779,10 +907,10 @@ function matchFileTriggers(filePath: string, projectDir?: string): {
         // 检查 match
         const isMatched = parsed.match.some(g => globToRegex(g).test(filePath));
         if (isMatched) {
-          const meta = parseMeta(content, 400);
+          const meta = parseMeta(entry.content, 400);
           return {
-            fullContent: content,
-            humanDescription: meta?.human_description || file,
+            fullContent: entry.content,
+            humanDescription: meta?.human_description || entry.fileName,
             confidence: meta?.confidence || "unknown",
             matchGlobs: parsed.match.join(", "),
           };
@@ -1057,22 +1185,22 @@ function decayAndPersist(
       if (now - lastWrite < DECAY_DEBOUNCE_MS) continue; // 防抖
 
       const mp = memoryPaths[parseInt(d.memPath, 10)] || MEMORIES_DIR;
-      const fpath = path.join(mp, "blocks", d.label + ".md");
+      // V3.5 分子目录：先子目录后 flat 查找已有文件
+      const fpath = findBlockFile(mp, d.label + ".md");
+      if (!fpath) continue;
       try {
-        if (fs.existsSync(fpath)) {
-          let content = fs.readFileSync(fpath, "utf-8");
-          // 提取当前 priority
-          const priMatch = content.match(/<!--\s*priority:\s*(\d+)\s*-->/);
-          const oldPri = priMatch ? parseInt(priMatch[1], 10) : 50;
-          const newPri = Math.max(floor, oldPri - decrement);
-          if (newPri < oldPri && priMatch) {
-            // 仅当文件已有 priority 元数据时才回写——避免盲注到错误位置
-            content = content.replace(priMatch[0], `<!-- priority: ${newPri} -->`);
-            fs.writeFileSync(fpath, content, "utf-8");
-            state.lastDecayWrite[d.label] = now;
-            state.missedRounds[d.label] = 0; // 重置计数
-            debug(`DECAY: ${d.label} priority ${oldPri}→${newPri}`);
-          }
+        let content = fs.readFileSync(fpath, "utf-8");
+        // 提取当前 priority
+        const priMatch = content.match(/<!--\s*priority:\s*(\d+)\s*-->/);
+        const oldPri = priMatch ? parseInt(priMatch[1], 10) : 50;
+        const newPri = Math.max(floor, oldPri - decrement);
+        if (newPri < oldPri && priMatch) {
+          // 仅当文件已有 priority 元数据时才回写——避免盲注到错误位置
+          content = content.replace(priMatch[0], `<!-- priority: ${newPri} -->`);
+          fs.writeFileSync(fpath, content, "utf-8");
+          state.lastDecayWrite[d.label] = now;
+          state.missedRounds[d.label] = 0; // 重置计数
+          debug(`DECAY: ${d.label} priority ${oldPri}→${newPri}`);
         }
       } catch (err) {
         debug(`DECAY: 写盘失败 ${fpath}: ${String(err)}`);
@@ -1135,11 +1263,8 @@ async function checkAndExtractCommitKnowledge(
     let existing = "";
     try {
       for (const mp of memoryPaths) {
-        const bd = path.join(mp, "blocks");
-        if (fs.existsSync(bd)) {
-          for (const f of fs.readdirSync(bd).filter(x => x.endsWith(".md"))) {
-            existing += `[${f}] ${safeReadFile(path.join(bd, f)).slice(0, 200)}\n`;
-          }
+        for (const entry of readBlocksDir(path.join(mp, "blocks"))) {
+          existing += `[${entry.fileName}] ${entry.content.slice(0, 200)}\n`;
         }
       }
     } catch {}
@@ -1176,11 +1301,10 @@ async function checkAndExtractCommitKnowledge(
 
     if (parsed.items) {
       for (const item of parsed.items) {
-        const mp = memoryPaths[parseInt(item.memPath, 10)] || MEMORIES_DIR;
-        const dir = path.join(mp, "blocks");
-        ensureDir(dir);
-        fs.writeFileSync(path.join(dir, item.file), item.content, "utf-8");
-        debug(`触发线5: 写入知识 → ${item.file} (${item.reason})`);
+    const mp = memoryPaths[parseInt(item.memPath, 10)] || MEMORIES_DIR;
+    const fpath = resolveWritePath(mp, "blocks", item.file, item.content);
+    fs.writeFileSync(fpath, item.content, "utf-8");
+    debug(`触发线5: 写入知识 → ${item.file} (${item.reason})`);
       }
     }
   } catch (err) { debug(`触发线5: LLM 异常 ${String(err)}`); }
@@ -1316,9 +1440,21 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
       // 按 type + status 分类
       const autoHabits = triggers.filter(t => t.type === "habit" && t.status === "auto");
       const suggestHabits = triggers.filter(t => t.type === "habit" && t.status === "suggest");
-      const pendingBlocks = blocks.filter(b => b.status === "pending");
-      const pendingTriggers = triggers.filter(t => t.status === "pending");
-      const pendingCount = pendingBlocks.length + pendingTriggers.length;
+      let pendingBlocks = blocks.filter(b => b.status === "pending");
+      let pendingTriggers = triggers.filter(t => t.status === "pending");
+      let pendingCount = pendingBlocks.length + pendingTriggers.length;
+
+      // 注入层去重（V3.5）：pending 注入前对描述做关键词重叠检查
+      // 两个 pending 块的 extractKeywords() 结果重叠率 ≥50% → 只保留优先级最高的一条
+      // 解决同习惯被重复创建导致同轮反复提示的问题
+      const dedupedBlocks = deduplicatePendingByKeywords(pendingBlocks, "description");
+      const dedupedTriggers = deduplicatePendingByKeywords(pendingTriggers, "human_description");
+      if (dedupedBlocks.length < pendingBlocks.length || dedupedTriggers.length < pendingTriggers.length) {
+        debug(`FRACTAL: 注入层去重 pending blocks ${pendingBlocks.length}→${dedupedBlocks.length} triggers ${pendingTriggers.length}→${dedupedTriggers.length}`);
+        pendingBlocks = dedupedBlocks;
+        pendingTriggers = dedupedTriggers;
+        pendingCount = pendingBlocks.length + pendingTriggers.length;
+      }
       const knowledgeItems = (blocks.filter(b => b.type === "knowledge" && b.status !== "pending") as any[])
         .concat(triggers.filter(t => t.type === "knowledge" && t.status !== "pending") as any[]);
 

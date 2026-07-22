@@ -1,4 +1,4 @@
-<!-- type: knowledge --><!-- status: auto --><!-- description: OC插件开发要点速查——hooks/加载/上下文方案 -->
+<!-- priority: 35 --><!-- type: knowledge --><!-- status: auto --><!-- description: OC插件开发要点速查——hooks/加载/上下文方案 -->
 
 ## OC 插件开发要点
 
