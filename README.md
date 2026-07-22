@@ -41,13 +41,13 @@ node deploy.mjs
 
 详细配置说明见下方 [部署](#部署) 章节。
 
-## 当前状态（2026-07-21）
+## 当前状态（2026-07-22）
 
 | 模块 | 版本 | 状态 |
 |------|------|------|
-| 双星系统 | V3.7 | ✅ skill 感知 + 修改审查 + 编码工程规范 + 工匠 LSP 深度 |
+| 双星系统 | V3.7 | ✅ skill 感知 + 修改审查 + 编码工程规范 + 工匠 LSP 深度 + 计划文档机制 |
 | agents-priority | — | ✅ AGENTS.md 中文规范始终位于 system prompt 最前面 |
-| 分形 Guardian | V3.4 | ✅ 五条触发线 + 可配阈值 + 关键词注入 + 三层记忆 + 自主知识记录 |
+| 分形 Guardian | V3.5 | ✅ 五条触发线 + 三层记忆 + 自主知识记录 + 计划摘要注入 + .active.json 跨会话跟踪 |
 | opencode-acp | latest | ✅ 自适应上下文压缩（触发线 3 由 ACP 覆盖，分形不再重复实现） |
 | AGENTS.md | — | ✅ 全局行为规范 |
 | CC 规则隔离 | — | ✅ `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT=1` |

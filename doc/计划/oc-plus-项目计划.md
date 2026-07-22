@@ -11,7 +11,7 @@
 | 模块 | 版本 | 状态 |
 |------|------|------|
 | 双星系统 | V3.7 | ✅ skill感知 + 修改审查 + 编码工程规范 + 工匠LSP深度 |
-| 分形 Guardian Agent | V3.4 | ✅ 五条触发线 + 可配阈值 + 关键词注入 + 默认行为 |
+| 分形 Guardian Agent | V3.5 | ✅ 五条触发线 + 可配阈值 + 关键词注入 + 计划摘要注入 + .active.json 跨会话跟踪 |
 | agents-priority | — | ✅ AGENTS.md 中文规范始终位于 system prompt 最前面 |
 | MCP 服务器 | — | ✅ github / websearch / gh_grep / context7（opencode.json 直配，不依赖外部插件） |
 | 部署脚本 | V3.6 | ✅ 移除 omo-slim 依赖，新增技能部署步骤 + MCP 配置提醒 |
