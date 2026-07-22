@@ -24,8 +24,23 @@ import os from "node:os";
 import crypto from "node:crypto";
 import { getSystemPrompt, getUserPrompt } from "./lib/prompts.js";
 
-// 模块级诊断：确认文件被 OC 导入
-console.log("[fractal] 模块已导入", new Date().toISOString());
+// ============================================================
+// 诊断模式：在 ~/.config/opencode/memories/.fractal-debug 创建空文件即可启用
+// 日志输出到 ~/.config/opencode/memories/fractal-startup.log + console
+// ============================================================
+const _FRACTAL_DEBUG_FLAG = path.join(os.homedir(), ".config", "opencode", "memories", ".fractal-debug");
+const _FRACTAL_DEBUG_LOG = path.join(os.homedir(), ".config", "opencode", "memories", "fractal-startup.log");
+const _IS_FRACTAL_DEBUG = fs.existsSync(_FRACTAL_DEBUG_FLAG);
+// 仅在诊断模式开启时暴露写日志函数（正常模式零开销——函数体为空）
+const _fractalDebug = _IS_FRACTAL_DEBUG
+  ? (label: string): void => {
+      const line = `[${new Date().toISOString()}] ${label}\n`;
+      try { fs.appendFileSync(_FRACTAL_DEBUG_LOG, line); } catch {/* 静默：权限/磁盘满等场景不崩溃 */}
+      console.log(`[fractal:debug] ${label}`);
+    }
+  : (_label: string): void => {/* noop — 诊断模式未开启 */};
+
+_fractalDebug("MODULE: imported");
 
 // V2.0：PluginInput 最小化接口
 interface PluginInput {
@@ -1176,6 +1191,7 @@ async function checkAndExtractCommitKnowledge(
 // ============================================================
 
 export const FractalPlugin = async (input: PluginInput, _options?: Record<string, unknown>) => {
+  _fractalDebug("FACTORY: called");
   ensureDir(MEMORIES_DIR);
   ensureDir(BLOCKS_DIR);
   ensureDir(TRIGGERS_DIR);
@@ -1220,6 +1236,7 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
       output: { system: string[] }
     ) => {
       debug("HOOK: system.transform fired");
+      _fractalDebug("HOOK: system.transform fired");
 
       // 注入频率控制：递增轮数计数器
       turnCounter++;
@@ -1530,6 +1547,7 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
       _input: unknown,
       output: { parts?: Array<{ type: string; text?: string; synthetic?: boolean }> }
     ) => {
+      _fractalDebug("HOOK: chat.message fired");
       // 捕获用户消息文本（用于知识注入关键词匹配）
       const userText = (output.parts || [])
         .filter(p => p.type === "text" && !p.synthetic)

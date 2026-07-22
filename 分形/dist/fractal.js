@@ -22,8 +22,25 @@ import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
 import { getSystemPrompt, getUserPrompt } from "./lib/prompts.js";
-// 模块级诊断：确认文件被 OC 导入
-console.log("[fractal] 模块已导入", new Date().toISOString());
+// ============================================================
+// 诊断模式：在 ~/.config/opencode/memories/.fractal-debug 创建空文件即可启用
+// 日志输出到 ~/.config/opencode/memories/fractal-startup.log + console
+// ============================================================
+const _FRACTAL_DEBUG_FLAG = path.join(os.homedir(), ".config", "opencode", "memories", ".fractal-debug");
+const _FRACTAL_DEBUG_LOG = path.join(os.homedir(), ".config", "opencode", "memories", "fractal-startup.log");
+const _IS_FRACTAL_DEBUG = fs.existsSync(_FRACTAL_DEBUG_FLAG);
+// 仅在诊断模式开启时暴露写日志函数（正常模式零开销——函数体为空）
+const _fractalDebug = _IS_FRACTAL_DEBUG
+    ? (label) => {
+        const line = `[${new Date().toISOString()}] ${label}\n`;
+        try {
+            fs.appendFileSync(_FRACTAL_DEBUG_LOG, line);
+        }
+        catch { /* 静默：权限/磁盘满等场景不崩溃 */ }
+        console.log(`[fractal:debug] ${label}`);
+    }
+    : (_label) => { };
+_fractalDebug("MODULE: imported");
 // ============================================================
 // 路径常量
 // ============================================================
@@ -171,6 +188,35 @@ function safeReadFile(filePath) {
     return "";
 }
 /**
+ * A+B 混合关键词提取：n-gram（中日韩文本）+ 标点分词（英文）
+ * 解决中文无空格分隔导致 split 式分词召回率为零的问题
+ */
+function extractKeywords(text) {
+    const lower = text.toLowerCase();
+    const keywords = [];
+    // 标点分词（英文/数字/混合文本）
+    const splitWords = lower.split(/[\s,，。.!！?？:：;；、\(\)（）\[\]【】"「」『』\n\r\t]+/).filter(t => t.length >= 2);
+    keywords.push(...splitWords);
+    // 字符 bigram + trigram（中日韩文本），只对非纯 ASCII 片段做
+    // 避免对英文单词做无意义的逐字 n-gram
+    const segments = lower.split(/[a-z0-9\s,，。.!！?？:：;；、\(\)（）\[\]【】"「」『』\n\r\t]+/);
+    for (const seg of segments) {
+        if (seg.length < 2)
+            continue;
+        // bigram: 滑动窗口取 2 字
+        for (let i = 0; i <= seg.length - 2; i++) {
+            keywords.push(seg.slice(i, i + 2));
+        }
+        // trigram: 滑动窗口取 3 字（仅文本较长时）
+        if (seg.length >= 4) {
+            for (let i = 0; i <= seg.length - 3; i++) {
+                keywords.push(seg.slice(i, i + 3));
+            }
+        }
+    }
+    return [...new Set(keywords)];
+}
+/**
  * 获取三层记忆路径
  * 优先级（同名项覆盖）：共享项目级 > 个人项目级 > 全局
  */
@@ -218,6 +264,8 @@ function mergeBlocksAndTriggers(memoryPaths) {
                         confidence: meta.confidence || "",
                         status: meta.status || "pending",
                         suggested_status: meta.suggested_status || "suggest",
+                        priority: parseInt(meta.priority, 10) || 50,
+                        category: meta.category || "reference",
                         memPathIndex: String(pathIndex),
                         fileName: file,
                         value: extractBlockValue(content),
@@ -350,25 +398,40 @@ async function getApiConfig() {
         try {
             const raw = fs.readFileSync(configPath, "utf-8");
             const config = JSON.parse(raw);
-            // 去掉 provider: 前缀，API 只接受纯 model 名
-            let model = (config.model || "my-deepseek:deepseek-v4-flash").includes(":")
-                ? (config.model || "my-deepseek:deepseek-v4-flash").split(":")[1]
-                : config.model;
-            // 分析任务用 flash 更经济，若非 flash 则替换
-            if (!model.includes("flash"))
-                model = "deepseek-v4-flash";
-            const providers = config.provider || {};
-            for (const [, provider] of Object.entries(providers)) {
-                const p = provider;
-                const opts = p.options;
-                if (opts?.apiKey && opts?.baseURL) {
-                    return {
-                        apiKey: opts.apiKey,
-                        baseURL: opts.baseURL.replace(/\/+$/, ""),
-                        model,
-                    };
+            // 解析 provider:model 格式（如 "ds:deepseek-v4-pro"），取 provider 名和模型名
+            const fullModel = String(config.model || "");
+            const colonIdx = fullModel.indexOf(":");
+            const providerName = colonIdx > 0 ? fullModel.slice(0, colonIdx) : "";
+            const currentModel = colonIdx > 0 ? fullModel.slice(colonIdx + 1) : fullModel;
+            // 从 provider 配置中查找对应 provider 的 options
+            const providers = config.provider;
+            const provider = providers?.[providerName];
+            const opts = provider?.options;
+            if (!opts?.apiKey || !opts?.baseURL) {
+                debug(`FRACTAL: 未找到 provider "${providerName}" 的有效 API 配置`);
+                return null;
+            }
+            // 从 provider.models 中获取可用模型列表，匹配式选择分析用模型
+            // 优先选含 "flash" 关键字的（更经济），否则用当前模型
+            const models = provider?.models;
+            let analysisModel = currentModel;
+            if (models) {
+                const modelKeys = Object.keys(models);
+                // 先找 flash 模型，找不到则用当前模型（当前模型也要在 models 中存在）
+                const flashKey = modelKeys.find(k => k.toLowerCase().includes("flash"));
+                if (flashKey) {
+                    analysisModel = flashKey;
+                }
+                else if (!modelKeys.includes(currentModel)) {
+                    // 当前模型不在 provider 的模型列表中，用第一个可用模型兜底
+                    analysisModel = modelKeys[0] || currentModel;
                 }
             }
+            return {
+                apiKey: opts.apiKey,
+                baseURL: opts.baseURL.replace(/\/+$/, ""),
+                model: analysisModel,
+            };
         }
         catch { /* 首次失败后重试 */ }
         if (attempt === 0)
@@ -406,9 +469,9 @@ async function analyzeAndUpdate(eventLines, memoryPaths) {
         return {
             ts: rec.ts,
             type: ev.type,
-            role: ev.properties?.role,
-            content: typeof ev.properties?.content === "string"
-                ? ev.properties.content.slice(0, 300)
+            role: ev.properties?.info?.role,
+            content: typeof ev.properties?.info?.content === "string"
+                ? ev.properties.info.content.slice(0, 300)
                 : undefined,
         };
     })
@@ -479,6 +542,71 @@ async function analyzeAndUpdate(eventLines, memoryPaths) {
     catch (err) {
         debug(`FRACTAL: LLM 调用异常 ${String(err)}`);
         return null;
+    }
+}
+/**
+ * C 方案：LLM 语义重排知识候选列表
+ * 仅当 n-gram + 双向匹配命中多条（>3）时调用，用 flash 模型筛选最相关的
+ * 返回重排后的列表，失败/超时返回 null（调用方回退到关键词排序）
+ */
+async function llmRerankKnowledge(userMessage, candidates) {
+    const config = await getApiConfig();
+    if (!config || candidates.length === 0)
+        return null;
+    // 构造候选摘要：每条一行，格式为 "索引: 描述"
+    const candidateLines = candidates.map((c, i) => {
+        const desc = c.item.human_description || c.item.description || "";
+        return `${i}: ${desc}`;
+    }).join("\n");
+    const prompt = `用户当前消息：${userMessage.slice(0, 200)}\n\n候选知识列表：\n${candidateLines}\n\n从以上候选中选出与用户消息最相关的条目，按相关性从高到低排列。返回纯数字索引列表，用逗号分隔（如 "3,0,4,1,2"），只输出索引不要任何其他文字。最多返回 5 条。`;
+    try {
+        debug(`FRACTAL: LLM 重排 ${candidates.length} 条知识候选...`);
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 3000); // 3s 超时，不阻塞主流程
+        const response = await fetch(`${config.baseURL}/chat/completions`, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${config.apiKey}`,
+            },
+            body: JSON.stringify({
+                model: config.model,
+                messages: [{ role: "user", content: prompt }],
+                temperature: 0,
+                max_tokens: 50,
+                thinking: { type: "disabled" },
+            }),
+            signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+        if (!response.ok)
+            return null;
+        const data = await response.json();
+        const result = data.choices?.[0]?.message?.content?.trim();
+        if (!result)
+            return null;
+        // 解析 LLM 返回的索引列表（如 "3,0,4,1,2"）
+        const indices = result.split(/[,，\s]+/).map(s => parseInt(s, 10)).filter(n => !isNaN(n) && n < candidates.length);
+        if (indices.length === 0)
+            return null;
+        // 按 LLM 给出的顺序重排，兜底保留未选中的原始顺序
+        const seen = new Set();
+        const reranked = [];
+        for (const idx of indices) {
+            if (!seen.has(idx)) {
+                reranked.push(candidates[idx]);
+                seen.add(idx);
+            }
+        }
+        // 把 LLM 没提到的候补追加在后面
+        for (let i = 0; i < candidates.length; i++) {
+            if (!seen.has(i))
+                reranked.push(candidates[i]);
+        }
+        return reranked;
+    }
+    catch {
+        return null; // 超时或其他异常，回退到关键词排序
     }
 }
 /**
@@ -809,6 +937,73 @@ function saveNoFeedbackState(state) {
 // ============================================================
 // 触发线 5：提交后知识提取
 // ============================================================
+// ---- PageOut 衰减状态 ----
+const DECAY_STATE_FILE = path.join(MEMORIES_DIR, ".decay-state.json");
+const DECAY_DEBOUNCE_MS = 30000; // 30s 防抖——同一条记忆不会在 30s 内被衰减两次
+function readDecayState() {
+    try {
+        if (fs.existsSync(DECAY_STATE_FILE)) {
+            return JSON.parse(fs.readFileSync(DECAY_STATE_FILE, "utf-8"));
+        }
+    }
+    catch { /* */ }
+    return { missedRounds: {}, lastDecayWrite: {} };
+}
+function saveDecayState(state) {
+    try {
+        fs.writeFileSync(DECAY_STATE_FILE, JSON.stringify(state, null, 2), "utf-8");
+    }
+    catch { /* */ }
+}
+/**
+ * PageOut 衰减：未被召回的记忆按 category 分级降权
+ * - constraint：永不衰减
+ * - reference：连续 10 轮未命中 → priority -5（最低 30）
+ * - preference：连续 5 轮未命中 → priority -10（最低 10）
+ * 写盘带 30s 防抖，避免同一轮多次衰减
+ */
+function decayAndPersist(decayed, memoryPaths) {
+    const state = readDecayState();
+    const now = Date.now();
+    for (const d of decayed) {
+        if (d.category === "constraint")
+            continue; // 硬约束永不衰减
+        // 递增未命中计数
+        state.missedRounds[d.label] = (state.missedRounds[d.label] || 0) + 1;
+        const missed = state.missedRounds[d.label];
+        const threshold = d.category === "preference" ? 5 : 10;
+        const decrement = d.category === "preference" ? 10 : 5;
+        const floor = d.category === "preference" ? 10 : 30;
+        if (missed >= threshold) {
+            const lastWrite = state.lastDecayWrite[d.label] || 0;
+            if (now - lastWrite < DECAY_DEBOUNCE_MS)
+                continue; // 防抖
+            const mp = memoryPaths[parseInt(d.memPath, 10)] || MEMORIES_DIR;
+            const fpath = path.join(mp, "blocks", d.label + ".md");
+            try {
+                if (fs.existsSync(fpath)) {
+                    let content = fs.readFileSync(fpath, "utf-8");
+                    // 提取当前 priority
+                    const priMatch = content.match(/<!--\s*priority:\s*(\d+)\s*-->/);
+                    const oldPri = priMatch ? parseInt(priMatch[1], 10) : 50;
+                    const newPri = Math.max(floor, oldPri - decrement);
+                    if (newPri < oldPri && priMatch) {
+                        // 仅当文件已有 priority 元数据时才回写——避免盲注到错误位置
+                        content = content.replace(priMatch[0], `<!-- priority: ${newPri} -->`);
+                        fs.writeFileSync(fpath, content, "utf-8");
+                        state.lastDecayWrite[d.label] = now;
+                        state.missedRounds[d.label] = 0; // 重置计数
+                        debug(`DECAY: ${d.label} priority ${oldPri}→${newPri}`);
+                    }
+                }
+            }
+            catch (err) {
+                debug(`DECAY: 写盘失败 ${fpath}: ${String(err)}`);
+            }
+        }
+    }
+    saveDecayState(state);
+}
 /**
  * 轮询检测新提交 → LLM 提取知识（每轮 system.transform 执行）
  * 通过对比 git log 时间戳与上次检查时间判断是否有新提交
@@ -929,6 +1124,7 @@ async function checkAndExtractCommitKnowledge(projectDir, memoryPaths) {
 // Plugin 导出
 // ============================================================
 export const FractalPlugin = async (input, _options) => {
+    _fractalDebug("FACTORY: called");
     ensureDir(MEMORIES_DIR);
     ensureDir(BLOCKS_DIR);
     ensureDir(TRIGGERS_DIR);
@@ -961,6 +1157,7 @@ export const FractalPlugin = async (input, _options) => {
          */
         "experimental.chat.system.transform": async (_input, output) => {
             debug("HOOK: system.transform fired");
+            _fractalDebug("HOOK: system.transform fired");
             // 注入频率控制：递增轮数计数器
             turnCounter++;
             const isNudgeTurn = turnCounter % NUDGE_INTERVAL === 0;
@@ -1034,54 +1231,144 @@ export const FractalPlugin = async (input, _options) => {
             const pendingCount = pendingBlocks.length + pendingTriggers.length;
             const knowledgeItems = blocks.filter(b => b.type === "knowledge" && b.status !== "pending")
                 .concat(triggers.filter(t => t.type === "knowledge" && t.status !== "pending"));
-            // 记忆反馈：关键词匹配优先 → mtime 排序（pursuit/dismissal）
-            // 从用户消息中提取关键词，匹配到知识描述的优先展示；超出 MAX_KNOWLEDGE_INJECT 的被截断
-            const userKeywords = lastUserMessage
-                ? [...new Set(lastUserMessage.toLowerCase().split(/[\s,，。.!！?？:：;；、\(\)（）\[\]【】"「」『』\n\r\t]+/).filter(t => t.length >= 2))]
-                : [];
+            // ---- 加权排序 + 四档分层（V3.5）----
+            // 融合 relevance（关键词命中率）+ priority（用户显式权重）+ recency（时间衰减）
+            const userMsgLower = (lastUserMessage || "").toLowerCase();
+            const userKeywords = lastUserMessage ? extractKeywords(lastUserMessage) : [];
+            const now = Date.now();
             const scored = [];
+            let maxRelevance = 1; // 避免除零
             for (const k of knowledgeItems) {
                 const mp = memoryPaths[parseInt(k.memPathIndex, 10)] || MEMORIES_DIR;
                 const subDir = k.human_description !== undefined ? "triggers" : "blocks";
                 const fpath = path.join(mp, subDir, k.fileName);
                 const desc = (k.human_description || k.description || "").toLowerCase();
                 const body = (k.content || k.value || "").toLowerCase();
-                // 计算关键词命中数——匹配到的知识更可能对当前任务有用
-                const hits = userKeywords.length > 0
+                // A：用户关键词命中知识描述
+                const forwardHits = userKeywords.length > 0
                     ? userKeywords.filter(kw => desc.includes(kw) || body.includes(kw)).length
                     : 0;
-                try {
-                    scored.push({ item: k, mtime: fs.statSync(fpath).mtimeMs, relevance: hits });
+                // B：双向——知识描述的关键词是否在用户消息中出现
+                let reverseHits = 0;
+                if (userMsgLower) {
+                    const descKeywords = extractKeywords(desc);
+                    reverseHits = descKeywords.filter(dk => dk.length >= 2 && userMsgLower.includes(dk)).length;
                 }
-                catch {
-                    scored.push({ item: k, mtime: 0, relevance: hits });
+                const hits = forwardHits + reverseHits;
+                if (hits > maxRelevance)
+                    maxRelevance = hits;
+                // mtime 用于 recency 因子（在加权循环中计算）
+                let mtimeMs = 0;
+                try {
+                    mtimeMs = fs.statSync(fpath).mtimeMs;
+                }
+                catch { /* */ }
+                scored.push({ item: k, mtime: mtimeMs, relevance: hits, priority: k.priority || 50, category: k.category || "reference", score: 0 });
+            }
+            // 加权融合（归一化 relevance 后计算）
+            // 权重来源：A-MAC(2603.04549) 结论——category 先验 + 命中率 + 时效性，priority 权重 0.5 是类别内最高单因子
+            for (const s of scored) {
+                const normRel = maxRelevance > 0 ? s.relevance / maxRelevance : 0;
+                s.score = normRel * 0.4 + (s.priority / 100) * 0.5 + Math.exp(-Math.max(0, (now - s.mtime) / (1000 * 60 * 60 * 24)) / 30) * 0.1;
+            }
+            scored.sort((a, b) => b.score - a.score);
+            // 四档分层
+            const HIGH = scored.filter(s => s.score >= 0.8 || s.priority >= 90 || s.category === "constraint"); // 硬约束保护
+            const IMPORTANT = scored.filter(s => !HIGH.includes(s) && s.score >= 0.6);
+            const OPERATIONAL = scored.filter(s => !HIGH.includes(s) && !IMPORTANT.includes(s) && s.score >= 0.3);
+            const GENERAL = scored.filter(s => !HIGH.includes(s) && !IMPORTANT.includes(s) && !OPERATIONAL.includes(s));
+            // 建造预算：HIGH 不参与计数，IMPORTANT + OPERATIONAL + GENERAL
+            const dynamicBudget = Math.max(2, Math.min(MAX_KNOWLEDGE_INJECT, Math.floor((8000 - output.system.join("\n").length / 4) / 800)));
+            let remainingBudget = dynamicBudget;
+            const selected = [];
+            // HIGH 全注入（预算外）
+            for (const s of HIGH) {
+                selected.push({ item: s.item, relevance: s.relevance, tier: "HIGH" });
+            }
+            // IMPORTANT → OPERATIONAL → GENERAL 按预算填充
+            for (const tier of [IMPORTANT, OPERATIONAL, GENERAL]) {
+                for (const s of tier) {
+                    if (remainingBudget <= 0)
+                        break;
+                    selected.push({ item: s.item, relevance: s.relevance, tier: tier === IMPORTANT ? "IMPORTANT" : tier === OPERATIONAL ? "OPERATIONAL" : "GENERAL" });
+                    remainingBudget--;
                 }
             }
-            scored.sort((a, b) => {
-                if (b.relevance !== a.relevance)
-                    return b.relevance - a.relevance; // 关键词匹配优先
-                return b.mtime - a.mtime; // 同匹配度按最近修改
-            });
-            const topKnowledge = scored.slice(0, MAX_KNOWLEDGE_INJECT);
-            const matchedCount = topKnowledge.filter(s => s.relevance > 0).length;
-            const trimmed = scored.length - topKnowledge.length;
-            // 注入 knowledge 索引（仅 nudge turn 注入，关键词匹配优先 → mtime 排序）
-            if (isNudgeTurn && topKnowledge.length > 0) {
-                const indexLines = topKnowledge.map(({ item: k, relevance }) => {
-                    const desc = k.human_description || k.description;
-                    const mp = memoryPaths[parseInt(k.memPathIndex, 10)] || MEMORIES_DIR;
-                    const subDir = k.human_description !== undefined ? "triggers" : "blocks";
-                    const filePath = `${mp}/${subDir}/${k.fileName}`.replace(HOME, "~");
-                    const tag = relevance > 0 ? " [相关]" : "";
-                    return `- **${desc}**${tag} → \`${filePath}\``;
-                });
-                const matchNote = matchedCount > 0
-                    ? `（其中 ${matchedCount} 条命中关键词）`
-                    : "";
-                const truncationNote = trimmed > 0
-                    ? `\n> （共 ${scored.length} 条知识，仅展示 ${topKnowledge.length} 条${matchNote}。其余用 read 工具按需读取）`
-                    : "";
-                output.system.push(`\n## 你记录的元知识索引\n以下是你之前记录的元知识摘要。遇到相关话题时，用 read 工具读取完整内容：\n\n${indexLines.join("\n")}${truncationNote}\n`);
+            // LLM 语义重排（候选 > 3 且有关键词命中时）
+            const matchedCount = selected.filter(s => s.relevance > 0).length;
+            let topKnowledge = selected;
+            if (matchedCount > 3 && userMsgLower) {
+                const reranked = await llmRerankKnowledge(userMsgLower, selected.map(s => ({ item: s.item, mtime: 0, relevance: s.relevance })));
+                if (reranked) {
+                    // 保留分层信息——LLM 重排后按原顺序重新标记 tier
+                    const tierMap = new Map(selected.map(s => [s.item.label || s.item.fileName, s.tier]));
+                    topKnowledge = reranked.map(r => ({ item: r.item, relevance: r.relevance, tier: tierMap.get(r.item.label || r.item.fileName) || "GENERAL" }));
+                    debug(`FRACTAL: LLM 重排知识，${reranked.length} 条中 ${reranked.filter(r => r.relevance > 0).length} 条命中`);
+                }
+            }
+            // 分组推送：同级内共享 ≥1 个 description 关键词的合并
+            const tierPrefixes = { HIGH: "🔴", IMPORTANT: "🟡", OPERATIONAL: "🟢", GENERAL: "" };
+            const pushGroups = [];
+            let lastMergedDesc = ""; // 追踪组内最后一个项的 description，用于关键词比对
+            for (const s of topKnowledge) {
+                const k = s.item;
+                const desc = k.human_description || k.description;
+                const mp = memoryPaths[parseInt(k.memPathIndex, 10)] || MEMORIES_DIR;
+                const subDir = k.human_description !== undefined ? "triggers" : "blocks";
+                const filePath = `${mp}/${subDir}/${k.fileName}`.replace(HOME, "~");
+                const tag = s.relevance > 0 ? " [相关]" : "";
+                const line = `- **${desc}**${tag} → \`${filePath}\``;
+                // 尝试合入上一组（同 tier 且与组内最后一条共享关键词）
+                const lastGroup = pushGroups.length > 0 ? pushGroups[pushGroups.length - 1] : null;
+                const descKeywords = extractKeywords(desc);
+                const lastKeywords = lastGroup ? extractKeywords(lastMergedDesc) : [];
+                const shared = descKeywords.filter(dk => lastKeywords.includes(dk)).length;
+                if (lastGroup && lastGroup.tier === s.tier && shared >= 2) {
+                    lastGroup.lines.push(line);
+                    lastMergedDesc = desc;
+                }
+                else {
+                    pushGroups.push({ tier: s.tier, lines: [line] });
+                    lastMergedDesc = desc;
+                }
+            }
+            // 注入分组知识索引
+            if ((isNudgeTurn || matchedCount > 0) && pushGroups.length > 0) {
+                const truncated = scored.length - topKnowledge.length;
+                const prefixMap = { HIGH: "🔴 硬约束（不受截断保护外的预算限制）", IMPORTANT: "🟡 重要知识", OPERATIONAL: "🟢 参考知识", GENERAL: "其他知识" };
+                for (const group of pushGroups) {
+                    const label = prefixMap[group.tier] || group.tier;
+                    output.system.push(`\n### ${label}\n${group.lines.join("\n")}\n`);
+                }
+                if (truncated > 0) {
+                    output.system.push(`\n> （共 ${scored.length} 条知识，已按权重分层注入 ${topKnowledge.length} 条。其余用 read 工具按需读取）\n`);
+                }
+            }
+            // ---- PageOut 衰减：注入集会中的命中项重置计数，未入选的递增累计 ----
+            {
+                const injectedLabels = new Set(topKnowledge.map(s => s.item.label || s.item.fileName));
+                const decayState = readDecayState();
+                // 命中项：重置计数
+                for (const label of injectedLabels) {
+                    if (decayState.missedRounds[label])
+                        decayState.missedRounds[label] = 0;
+                }
+                // 未入选项：构建衰减列表
+                const decayCandidates = [];
+                for (const s of scored) {
+                    const label = s.item.label || s.item.fileName;
+                    if (!injectedLabels.has(label)) {
+                        decayCandidates.push({
+                            label,
+                            memPath: s.item.memPathIndex || "0",
+                            category: s.item.category || "reference",
+                        });
+                    }
+                }
+                saveDecayState(decayState);
+                if (decayCandidates.length > 0) {
+                    decayAndPersist(decayCandidates, memoryPaths);
+                }
             }
             // 注入 auto habits（已确认的习惯，仅 nudge turn 注入）
             // 改为指令语气：这不是观察结论，是 LLM 必须照做的默认行为
@@ -1095,8 +1382,8 @@ export const FractalPlugin = async (input, _options) => {
                 output.system.push(`\n## 待观察的习惯\n你偶尔在以下场景做这些事，还不够确定，仅供参考：\n\n${triggerTexts}\n`);
             }
             if (triggers.length > 0) {
-                const skipped = !isNudgeTurn ? " (间隔跳过注入)" : "";
-                const trimInfo = trimmed > 0 ? ` 截断${trimmed}条` : "";
+                const skipped = (!isNudgeTurn && matchedCount === 0) ? " (间隔跳过注入)" : (!isNudgeTurn && matchedCount > 0 ? ` (关键词命中${matchedCount}条，立即注入)` : "");
+                const trimInfo = scored.length > topKnowledge.length ? ` 截断${scored.length - topKnowledge.length}条` : "";
                 const matchInfo = matchedCount > 0 ? ` 命中${matchedCount}条` : "";
                 debug(`FRACTAL: 注入 ${autoHabits.length} 个已确认 + ${suggestHabits.length} 个观察中 + ${knowledgeItems.length} 个元知识→展示${topKnowledge.length}${matchInfo}${trimInfo}${skipped}`);
             }
@@ -1126,6 +1413,8 @@ export const FractalPlugin = async (input, _options) => {
                     saveNoFeedbackState(nfs);
                 }
             }
+            // 中文思考：独立 system message，最高 recency，不受 core-rules 大块稀释
+            output.system.push("\n以中文思考，除非用户要求，否则回答也使用中文。\n");
         },
         /**
          * 双通道注入：在用户消息到达时注入警告（同轮可见，比 system.transform 更即时）
@@ -1136,6 +1425,7 @@ export const FractalPlugin = async (input, _options) => {
          *   - system.transform：knowledge/habits 按 NUDGE_INTERVAL 节流（减少 prompt 污染）
          */
         "chat.message": async (_input, output) => {
+            _fractalDebug("HOOK: chat.message fired");
             // 捕获用户消息文本（用于知识注入关键词匹配）
             const userText = (output.parts || [])
                 .filter(p => p.type === "text" && !p.synthetic)
@@ -1163,9 +1453,11 @@ export const FractalPlugin = async (input, _options) => {
                 try {
                     const props = event.properties;
                     const sessionID = props?.sessionID;
+                    // OpenCode 事件中 role/content/parts 嵌套在 info 对象内
+                    const info = props?.info;
                     // 触发线 4：检测 websearch 工具调用（在助手消息的 parts 中查找）
-                    if (props?.role === "assistant" && Array.isArray(props?.parts)) {
-                        for (const p of props.parts) {
+                    if (info?.role === "assistant" && Array.isArray(info?.parts)) {
+                        for (const p of info.parts) {
                             if (p?.type === "tool_call" && WEBSEARCH_TOOLS.test(String(p?.tool || ""))) {
                                 websearchCalledThisTurn = true;
                                 debug(`触发线4: 检测到联网查证 → ${p.tool}`);
@@ -1179,7 +1471,7 @@ export const FractalPlugin = async (input, _options) => {
                         }
                     }
                     // 触发线 4：用户新消息 → 重置本轮标志 + 衰减计数器
-                    if (props?.role === "user") {
+                    if (info?.role === "user") {
                         // 上轮有断言但本轮是新的用户消息 → 上一轮结束，检查是否需要衰减
                         if (!assertionDetectedThisTurn) {
                             decayCounter(sessionID || "");
@@ -1208,8 +1500,8 @@ export const FractalPlugin = async (input, _options) => {
                         debug(`触发线4: 新用户消息 → 重置本轮标志`);
                     }
                     // 触发线 4：扫描 assistant 输出 → 分级计数而非简单标记
-                    if (props?.role === "assistant" && typeof props?.content === "string") {
-                        const content = props.content;
+                    if (info?.role === "assistant" && typeof info?.content === "string") {
+                        const content = info.content;
                         if (ASSERTION_RE.test(content)) {
                             const snippet = content.slice(Math.max(0, content.search(ASSERTION_RE) - 40), content.search(ASSERTION_RE) + 80);
                             // 写入旧版信号文件（保留兼容）

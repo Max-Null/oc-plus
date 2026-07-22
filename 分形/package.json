@@ -1,25 +1,15 @@
 {
   "name": "oc-plus-fractal",
-  "version": "3.1.0",
-  "description": "分形 Guardian Agent — OC 本地知识记录 + 多场景触发线",
+  "version": "1.0.0",
+  "description": "分形 Guardian Agent — 知识记忆、习惯学习、行为监控、上下文合规（oc-plus 插件）",
   "type": "module",
   "main": "dist/fractal.js",
   "types": "dist/fractal.d.ts",
-  "exports": {
-    ".": {
-      "import": "./dist/fractal.js",
-      "types": "./dist/fractal.d.ts"
-    }
-  },
   "files": [
     "dist/",
-    "fractal.ts",
-    "prompts.ts"
+    "lib/",
+    "prompts/"
   ],
-  "scripts": {
-    "build": "tsc"
-  },
-  "dependencies": {
-    "@opencode-ai/plugin": "1.18.3"
-  }
+  "keywords": ["opencode", "plugin", "memory", "guardian", "fractal"],
+  "license": "MIT"
 }

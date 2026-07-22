@@ -1,4 +1,4 @@
-<!-- type: knowledge --><!-- status: auto --><!-- description: OC Plugin API V1 完整 Hooks 接口和可用事件速查表 -->
+<!-- priority: 30 --><!-- type: knowledge --><!-- status: auto --><!-- description: OC Plugin API V1 完整 Hooks 接口和可用事件速查表 -->
 ## OC Plugin API — Hooks 完整清单
 
 事实：`@opencode-ai/plugin` V1 Hooks 接口定义了 16+ 个 hook 入口，event hook 有 30+ 事件类型。

@@ -1,4 +1,4 @@
-<!-- type: knowledge --><!-- status: auto --><!-- description: oc-plus 改动流程——先改源码再部署，不要反过来 -->
+<!-- priority: 30 --><!-- type: knowledge --><!-- status: auto --><!-- description: oc-plus 改动流程——先改源码再部署，不要反过来 -->
 
 ## 改动流程：先源码，再部署
 

@@ -1,4 +1,4 @@
-<!-- type: knowledge --><!-- status: auto --><!-- description: OC EventMessageUpdated 事件结构——role/content 在 info 内 -->
+<!-- priority: 30 --><!-- type: knowledge --><!-- status: auto --><!-- description: OC EventMessageUpdated 事件结构——role/content 在 info 内 -->
 
 ## EventMessageUpdated 事件结构（实测 + SDK 类型确认）
 

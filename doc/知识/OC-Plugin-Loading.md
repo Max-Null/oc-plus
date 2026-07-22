@@ -141,21 +141,25 @@ plugins/
 **根因**：OC 1.18 的 `resolvePluginTarget` 可能不处理本地 `file://` URL，或处理失败时静默跳过  
 **替代方案**：发布为 npm 包。
 
-### 坑 9：OC 1.18.3 Windows 本地插件全部失效
+### 坑 9：OC 1.18.3 Windows 本地插件全部失效（仅 npm registry 可用）
 
 **现象**：`~/.config/opencode/plugins/*.ts` / `*.js` 自动发现不工作；`.opencode/plugins/*` 项目级也不工作；`file://` URL 不工作；npm 包正常（`opencode-acp@latest` 可加载）。
 
 **验证手段**（2026-07-21 实测）：
-1. 零依赖 JS 插件 `test-js.js` 放 `plugins/` 目录 — 不加载 ✗
-2. `.opencode/plugins/test-js.js` 项目级 — 不加载 ✗
-3. `file:///C:/Users/.../plugins/test-plugin.ts` in plugin array — 不加载 ✗
-4. `opencode-acp@latest` npm 包 — 正常加载 ✓
 
-**结论**：OC 1.18.3 Windows 版仅支持 npm 包插件。本地开发必须走 npm 包路径——创建 `package.json` 或发布到 registry。
+| # | 方法 | 结果 |
+|---|------|------|
+| 1 | `plugins/test-js.js` 零依赖自动发现 | ❌ |
+| 2 | `.opencode/plugins/test-js.js` 项目级 | ❌ |
+| 3 | `"file:///C:/Users/.../xxx.ts"` in plugin array | ❌ |
+| 4 | `npm install file:路径` → `~/.config/opencode/node_modules/` | ❌ (OC 不读此目录) |
+| 5 | `npm install file:路径` → `~/.cache/opencode/packages/` | ❌ (Bun 不解析 `file:` 依赖) |
+| 6 | `opencode plugin add "file:/D:/Project/oc-plus/分形"` | ❌ (被当包名去 npm 查) |
+| 7 | npm 预编译 `.js` + junction → OC 缓存 | ❌ |
+| 8 | `opencode-acp@latest` npm registry 包 | ✅ |
+| 9 | **`"./plugins/xxx/dist/xxx.js"` 相对路径** | ✅ **(2026-07-22 实测通过)** |
 
-**替代方案**：
-- 开发阶段用 `npm link` 或 `file:` 依赖安装到 `~/.config/opencode/node_modules/`
-- 正式使用发布到 npm registry
+**结论**：OC 1.18.3 Windows 版**支持本地文件相对路径引用**。将编译后的 `.js` 放在 `~/.config/opencode/plugins/<name>/dist/` 子目录结构中，用 `"./plugins/<name>/dist/<name>.js"` 相对路径在 `opencode.json` plugin 数组中引用即可。子目录自带 `package.json`（含 `"main"` 字段）可按 OC 目录扫描机制自动发现。裸 `.ts` 文件放 `plugins/` 根目录**不被**自动发现。
 
 ## ACP 集成建议
 

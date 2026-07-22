@@ -1,4 +1,4 @@
-<!-- type: knowledge --><!-- status: auto --><!-- description: OC 插件中读取 API 配置的正确方式——匹配式查 provider.models，不硬编码 -->
+<!-- priority: 30 --><!-- type: knowledge --><!-- status: auto --><!-- description: OC 插件中读取 API 配置的正确方式——匹配式查 provider.models，不硬编码 -->
 
 ## 插件中 LLM API 配置的正确读取方式
 

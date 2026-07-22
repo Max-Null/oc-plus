@@ -1,4 +1,4 @@
-<!-- type: knowledge --><!-- status: auto --><!-- description: CC 核心能力边界速查——插件/Hook/Agent/MCP 真实能力清单 -->
+<!-- priority: 30 --><!-- type: knowledge --><!-- status: auto --><!-- description: CC 核心能力边界速查——插件/Hook/Agent/MCP 真实能力清单 -->
 ## CC 核心能力速查
 
 事实：CC 和 OC 在插件系统上基本同级，各有优势。
