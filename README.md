@@ -100,6 +100,7 @@ node deploy.mjs
 分形/prompts/              ← 可定制 prompt 模板（core-rules/websearch-rules/assertion-reminder）
 分形/scripts/              ← CLI 工具：fractal-cli
 分形/设计.md               ← 设计文档（V3.6）
+分形/机制说明.md            ← 机制说明 + 时序图（给人类用户看）
 ```
 
 ## 内置技能（14 个）
