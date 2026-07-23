@@ -1429,6 +1429,25 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
 
   // 双通道注入：chat.message 同轮警告（比 system.transform 跨轮提醒更即时）
   let pendingWarnings: string[] = [];
+  /** 文件编辑审查队列：file.edited 入队 → session.idle 批量消费 */
+  let pendingReviewQueue: Array<{ filePath: string; trigger: { fullContent: string; humanDescription: string; confidence: string; matchGlobs: string }; sessionID: string }> = [];
+
+  /** mergeBlocksAndTriggers 5 秒缓存（避免 session.idle + chat.message 重复 IO） */
+  let _blocksCache: { blocks: any[]; triggers: any[] } | null = null;
+  let _blocksCacheTime = 0;
+  let _blocksCacheKey = "";
+
+  function getBlocksCached(memPaths: Record<string, unknown>): { blocks: any[]; triggers: any[] } {
+    const cacheKey = JSON.stringify(memPaths);
+    const now = Date.now();
+    if (_blocksCache && cacheKey === _blocksCacheKey && now - _blocksCacheTime < 5000) {
+      return _blocksCache;
+    }
+    _blocksCache = mergeBlocksAndTriggers(memPaths as any) as { blocks: any[]; triggers: any[] };
+    _blocksCacheKey = cacheKey;
+    _blocksCacheTime = now;
+    return _blocksCache;
+  }
 
   // 知识注入精准度：捕获上轮用户消息，用于关键词匹配
   let lastUserMessage = "";
@@ -1713,22 +1732,7 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
         debug(`FRACTAL: 注入 ${autoHabits.length} 个已确认 + ${suggestHabits.length} 个观察中 + ${knowledgeItems.length} 个元知识→展示${topKnowledge.length}${matchInfo}${trimInfo}${skipped}`);
       }
 
-      // 注入 pending 确认提示
-      if (pendingCount > 0) {
-        const levelName = (mp: string) => ({ "0": "全局", "1": "个人项目级", "2": "共享项目级" })[mp] || "未知";
-        const pendingList = [
-          ...pendingBlocks.map(b =>
-            `- **${b.description || "（无描述）"}**（建议：${b.suggested_status || "suggest"}·${levelName(b.memPathIndex)}）`
-          ),
-          ...pendingTriggers.map(t =>
-            `- **${t.human_description || "（无描述）"}**（建议：${t.suggested_status || "suggest"}·${levelName(t.memPathIndex)}）`
-          ),
-        ].join("\n");
-        const firstDesc = pendingBlocks[0]?.description || pendingTriggers[0]?.human_description || "新模式";
-        output.system.push(
-          `\n## ⚠️ 分形发现了新习惯，必须确认后才能继续\n分形自动分析了你的操作，发现了以下新模式。**这是硬性规则（见 AGENTS.md），你必须先用 question 工具逐条确认，确认完成后才能继续执行用户任务。**\n\n${pendingList}\n\n确认方式：用 question 工具，格式参考：\n\`\`\`json\n{ "questions": [{ "question": "分形发现了习惯「${firstDesc}」，是否保存？", "header": "确认习惯", "options": [{"label": "自动·全局", "description": "所有项目适用"}, {"label": "自动·本项目", "description": "仅当前项目"}, {"label": "建议·全局", "description": "观察中，所有项目"}, {"label": "建议·本项目", "description": "观察中，仅本项目"}, {"label": "不保存", "description": "跳过此习惯"}] }] }\n\`\`\`\n用户确认后：\n1. 根据选项编辑 blocks/*.md 文件的 status 为 auto 或 suggest\n2. 如果用户选的层级与 LLM 建议不同，将文件移动到对应 memPath（0=全局，1=个人项目级，2=共享项目级）\n3. 用户选择跳过则删除该文件\n`
-        );
-      }
+      // pending 确认提示已移至 session.idle 事件处理（温和提醒，不再硬性阻断）
 
       // 触发线 4：强化版联网查证规则（外部模板 ~/.config/opencode/fractal-prompts/websearch-rules.md）
       const websearchRules = loadPrompt("websearch-rules.md",
@@ -1786,6 +1790,30 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
         .map(p => p.text || "")
         .join(" ");
       if (userText) lastUserMessage = userText;
+
+      // 检测"确认习惯"指令 → 加载 pending items 到 pendingWarnings，触发 question 确认流程
+      if (userText && /确认习惯|确认pending/i.test(userText)) {
+        try {
+          const { blocks, triggers: allTriggers } = getBlocksCached(getMemoryPaths(projectDir) as unknown as Record<string, unknown>);
+          const pendingItems = [
+            ...blocks.filter(b => b.status === "pending").map(b => ({
+              desc: b.description || "(无描述)", status: b.suggested_status || "suggest", mp: b.memPathIndex
+            })),
+            ...allTriggers.filter(t => t.status === "pending").map(t => ({
+              desc: t.human_description || "(无描述)", status: t.suggested_status || "suggest", mp: t.memPathIndex
+            })),
+          ];
+          if (pendingItems.length > 0) {
+            const levelName = (mp: string) => ({ "0": "全局", "1": "个人项目级", "2": "共享项目级" })[mp] || "未知";
+            const list = pendingItems.map(p => `- **${p.desc}**（建议：${p.status}·${levelName(p.mp)}）`).join("\n");
+            const firstDesc = pendingItems[0].desc;
+            const confirmMsg = `分形习惯确认：用户想确认以下 ${pendingItems.length} 条待定习惯。请使用 question 工具逐条确认，格式：\n{ "questions": [{ "question": "分形发现了习惯「${firstDesc}」，是否保存？", "header": "确认习惯", "options": [{"label": "自动·全局", "description": "所有项目适用"}, {"label": "自动·本项目", "description": "仅当前项目"}, {"label": "建议·全局", "description": "观察中，所有项目"}, {"label": "建议·本项目", "description": "观察中，仅本项目"}, {"label": "不保存", "description": "跳过此习惯"}] }] }\n待确认项：\n${list}\n确认后：1. 根据选项编辑 blocks/*.md 的 status 为 auto/suggest 2. 层级不匹配则移动文件 3. 选跳过则删除文件`;
+            pendingWarnings.push(confirmMsg);
+          } else {
+            pendingWarnings.push("分形：当前无待确认习惯。");
+          }
+        } catch { /* 静默 */ }
+      }
 
       if (pendingWarnings.length > 0) {
         const warningText = `\n[分形 Guardian] ${pendingWarnings.join(" | ")}\n`;
@@ -1891,53 +1919,123 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
         } catch { /* 静默 */ }
       }
 
-      // 记录文件编辑事件 + trigger 匹配（V2.0）
+      // 统一 sessionID 提取（多事件属性键兼容）
+      function extractSessionID(props?: Record<string, unknown>): string | undefined {
+        return (props?.sessionID || (props?.info as any)?.id) as string | undefined;
+      }
+
+      // 队列化文件编辑审查（推迟到 session.idle 批量消费，避免打断 agent 回复）
       if (event.type === "file.edited" || event.type === "file.watcher.updated") {
         editsThisTurn++; // 触发线 2 扩展：累计本轮编辑次数
         logEvent(event);
-        tryTriggerMatch(event.properties);
+        queueFileEditReview(event.properties);
       }
 
-      // V2.0：三层漏斗 — glob 预筛选 → LLM 语义判断 → prompt 注入（不 await）
-      function tryTriggerMatch(props?: Record<string, unknown>) {
+      // 会话空闲/完成：消费审查队列 + 习惯确认温和提醒
+      if (event.type === "session.idle") {
+        onSessionEnd(event.properties);
+      }
+      // session.status 是 session.idle 的推荐替代，等价处理 + 记录日志供验证
+      if (event.type === "session.status") {
+        debug(`HOOK: session.status fired — ${JSON.stringify(event.properties)}`);
+        onSessionEnd(event.properties);
+      }
+
+      // 会话结束时的统一处理（去重由 session.idle + session.status 各自的触发频率保证）
+      function onSessionEnd(props?: Record<string, unknown>) {
+        flushReviewQueue(props);
+        injectPendingHabitReminder(props);
+      }
+
+      // 队列化：glob 预筛选 → 入队（不做 LLM 调用，不打断回复）
+      function queueFileEditReview(props?: Record<string, unknown>) {
         if (!props) return;
-        // 尝试多种可能的事件属性键获取文件路径
         const filePath = (props.file || props.path || props.filePath ||
           (props.params as any)?.file || (props.params as any)?.path ||
           (props.params as any)?.filePath) as string | undefined;
         if (!filePath || typeof filePath !== "string") return;
 
-        // 第一层：glob 预筛选
         const trigger = matchFileTriggers(filePath, projectDir);
         if (!trigger) return;
 
-        // 从事件属性提取 session ID
-        const sessionID = (props.sessionID || (props.info as any)?.id) as string | undefined;
-        if (!sessionID) {
-          debug("TRIGGER: 无法获取 sessionID，跳过 prompt 注入");
-          return;
+        const sessionID = extractSessionID(props);
+        if (!sessionID) return;
+
+        pendingReviewQueue.push({ filePath, trigger, sessionID });
+        debug(`TRIGGER: 排队 ${filePath}（等待 session.idle）`);
+      }
+
+      // session.idle 时消费队列：LLM 语义判断 → prompt 注入（异步，不 await）
+      function flushReviewQueue(endProps?: Record<string, unknown>) {
+        if (pendingReviewQueue.length === 0) return;
+        const idleSessionID = extractSessionID(endProps);
+        // 按 sessionID 过滤（多会话隔离），未匹配的保留
+        const matched: typeof pendingReviewQueue = [];
+        const remaining: typeof pendingReviewQueue = [];
+        for (const item of pendingReviewQueue) {
+          if (idleSessionID && item.sessionID === idleSessionID) {
+            matched.push(item);
+          } else if (!idleSessionID) {
+            debug(`TRIGGER: session 结束事件无 sessionID，跳过队列消费（保留 ${pendingReviewQueue.length} 项待后续处理）`);
+          } else {
+            remaining.push(item);
+          }
         }
+        pendingReviewQueue = remaining;
+        if (matched.length === 0) return;
 
-        debug(`TRIGGER: glob 匹配 ${filePath} → 习惯「${trigger.humanDescription}」，异步调 LLM 语义判断...`);
+        debug(`TRIGGER: session 结束 → 消费 ${matched.length} 条审查${remaining.length > 0 ? `（${remaining.length} 条保留等待其他会话）` : ""}`);
+        for (const item of matched) {
+          debug(`TRIGGER: 异步 LLM 语义判断 — ${item.filePath}（习惯: ${item.trigger.humanDescription}）`);
+          generateTriggerMessage(item.filePath, item.trigger).then((msg) => {
+            if (!msg) return;
+            client.session.promptAsync({
+              path: { id: item.sessionID },
+              body: { noReply: true, parts: [{ type: "text", text: msg }] },
+            }).then(() => {
+              debug(`TRIGGER: prompt 注入成功 — ${item.filePath}`);
+            }).catch((err: unknown) => {
+              debug(`TRIGGER: prompt 注入失败 — ${String(err)}`);
+            });
+          }).catch((err: unknown) => {
+            debug(`TRIGGER: LLM 语义判断异常 — ${String(err)}`);
+          });
+        }
+      }
 
-        // 二+三层：异步调 LLM 生成消息（含透明度标注）→ 注入（不 await 主流程）
-        generateTriggerMessage(filePath, trigger).then((msg) => {
-          if (!msg) return; // LLM 判断不匹配，静默跳过
+      // session 结束时注入待确认习惯提醒（温和，不阻断 agent 流程）
+      function injectPendingHabitReminder(endProps?: Record<string, unknown>) {
+        try {
+          const { blocks, triggers: allTriggers } = getBlocksCached(getMemoryPaths(projectDir) as unknown as Record<string, unknown>);
+          const pendingBlocks = blocks.filter(b => b.status === "pending");
+          const pendingTriggers = allTriggers.filter(t => t.status === "pending");
+          const pendingCount = pendingBlocks.length + pendingTriggers.length;
+          if (pendingCount === 0) return;
+
+          const sessionID = extractSessionID(endProps);
+          if (!sessionID) return;
+
+          const levelName = (mp: string) => ({ "0": "全局", "1": "个人项目级", "2": "共享项目级" })[mp] || "未知";
+          const pendingList = [
+            ...pendingBlocks.map(b =>
+              `- **${b.description || "（无描述）"}**（建议：${b.suggested_status || "suggest"}·${levelName(b.memPathIndex)}）`
+            ),
+            ...pendingTriggers.map(t =>
+              `- **${t.human_description || "（无描述）"}**（建议：${t.suggested_status || "suggest"}·${levelName(t.memPathIndex)}）`
+            ),
+          ].join("\n");
+
+          const reminder = `\n## 🟡 分形：有待确认的习惯\n\n上次操作中发现以下新模式，有空时确认：\n\n${pendingList}\n\n确认方式：说"确认习惯"即可逐条确认\n`;
 
           client.session.promptAsync({
             path: { id: sessionID },
-            body: {
-              noReply: true,
-              parts: [{ type: "text", text: msg }],
-            },
+            body: { noReply: true, parts: [{ type: "text", text: reminder }] },
           }).then(() => {
-            debug(`TRIGGER: prompt 注入成功 — ${filePath}`);
+            debug("HABIT: 温和提醒注入成功");
           }).catch((err: unknown) => {
-            debug(`TRIGGER: prompt 注入失败 — ${String(err)}`);
+            debug(`HABIT: 提醒注入失败 — ${String(err)}`);
           });
-        }).catch((err: unknown) => {
-          debug(`TRIGGER: LLM 语义判断异常 — ${String(err)}`);
-        });
+        } catch { /* 静默 */ }
       }
 
       // 调试：记录事件类型分布（仅首次遇到新事件类型时记录）
