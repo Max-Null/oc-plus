@@ -1961,6 +1961,11 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
         const sessionID = extractSessionID(props);
         if (!sessionID) return;
 
+        // 队列上限（20 条），防止 session.idle 不触发时无限增长
+        if (pendingReviewQueue.length >= 20) {
+          const removed = pendingReviewQueue.shift();
+          debug(`TRIGGER: 队列已满（≥20），丢弃最旧项 — ${removed?.filePath}`);
+        }
         pendingReviewQueue.push({ filePath, trigger, sessionID });
         debug(`TRIGGER: 排队 ${filePath}（等待 session.idle）`);
       }
@@ -2035,7 +2040,7 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
           }).catch((err: unknown) => {
             debug(`HABIT: 提醒注入失败 — ${String(err)}`);
           });
-        } catch { /* 静默 */ }
+        } catch (err) { debug(`HABIT: injectPendingHabitReminder 异常 — ${String(err)}`); }
       }
 
       // 调试：记录事件类型分布（仅首次遇到新事件类型时记录）
