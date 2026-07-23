@@ -1,4 +1,4 @@
-<!-- priority: 50 --><!-- type: knowledge --><!-- status: auto --><!-- description: 触发线4断言正则的盲区——隐性推断型假话 -->
+<!-- priority: 45 --><!-- type: knowledge --><!-- status: auto --><!-- description: 触发线4断言正则的盲区——隐性推断型假话 -->
 
 ## 触发线 4 ASSERTION_RE 的盲区
 
