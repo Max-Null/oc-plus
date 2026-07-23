@@ -22,6 +22,8 @@
 - DeepSeek API Key（[免费注册](https://platform.deepseek.com/api_keys)）
 - （可选）GitHub Personal Access Token — 启用 GitHub MCP 操作
 
+> **🦸 配套 [superpowers](https://github.com/obra/superpowers)**：提供 20+ 个通用 skills（brainstorming、subagent-driven-development、test-driven-development 等），与 oc-plus 的 14 个专项 skills 互补。`deploy.mjs` 会自动安装到 `~/.config/opencode/node_modules/superpowers/`，无需手动操作。
+
 ## 快速开始
 
 ```powershell
@@ -142,7 +144,7 @@ node deploy.mjs
 .\deploy.ps1
 ```
 
-脚本自动执行 7 步：清理过期文件 → 创建目录 → 部署 agent/plugin → 命令 → 脚本 → prompt 模板 → 技能。
+脚本自动执行 8 步：清理过期文件 → 创建目录 → 部署 agent/plugin → 命令 → 脚本 → prompt 模板 → 技能 → 安装 superpowers。
 
 ### 手动配置
 

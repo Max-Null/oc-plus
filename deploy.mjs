@@ -1,5 +1,5 @@
 /**
- * oc-plus 部署脚本 V3.9（Node.js 跨平台）
+ * oc-plus 部署脚本 V3.10（Node.js 跨平台）
  * 注意：此版本号仅为部署脚本自身的迭代标识，非 oc-plus 系统版本。
  *       各组件独立管理版本：双星 V3.7 / 分形 v3.4 / 技能 各自维护。
  *
@@ -11,6 +11,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
+import { execSync } from "node:child_process";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const HOME = os.homedir();
@@ -162,11 +163,40 @@ function cleanupStaleGlob(dir, globPrefix) {
 }
 
 // ============================================================
+// superpowers 安装
+// ============================================================
+
+/**
+ * 自动安装 superpowers 插件到 ~/.config/opencode/node_modules/superpowers
+ * 已存在则跳过，避免重复联网下载。
+ * 安装失败不阻断部署流程。
+ */
+function installSuperpowers() {
+  const destDir = path.join(OC, "node_modules", "superpowers");
+  if (fs.existsSync(destDir)) {
+    log(".", "superpowers 已安装，跳过");
+    return;
+  }
+  try {
+    log(".", "安装中（首次需下载 ~2MB，约 5-10 秒）...");
+    execSync(
+      `npm install superpowers@git+https://github.com/obra/superpowers.git --prefix "${OC}"`,
+      { stdio: "pipe", timeout: 120000 }
+    );
+    log("V", "superpowers 安装成功");
+  } catch (e) {
+    const msg = e.stderr?.toString() || e.message;
+    log("!", `superpowers 安装失败（不影响 oc-plus 使用）: ${msg.slice(0, 120)}`);
+    log("!", `手动安装: npm install superpowers@git+https://github.com/obra/superpowers.git --prefix "${OC}"`);
+  }
+}
+
+// ============================================================
 // 主流程
 // ============================================================
 
 function main() {
-  console.log("===== oc-plus 部署 V3.9 =====");
+  console.log("===== oc-plus 部署 V3.10 =====");
   console.log(`目标: ${OC}\n`);
 
   // [0/7] pre-deployment cleanup of deprecated files
@@ -230,6 +260,11 @@ function main() {
   console.log("[7/7] deploying skills...");
   copyDir(SRC.skills, DST.skills, true); // skip existing — don't overwrite user's skill mods
   copyDir(SRC.fractalSkills, DST.skills, true); // 分形专属技能
+  console.log("");
+
+  // [8/8] install superpowers plugin
+  console.log("[8/8] installing superpowers plugin...");
+  installSuperpowers();
   console.log("");
 
   // summary
