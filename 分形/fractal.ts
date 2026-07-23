@@ -1,8 +1,8 @@
 /**
- * 分形 Plugin for OpenCode — v3.5
+ * 分形 Plugin for OpenCode — v3.6
  *
  * 五条触发线 Guardian Agent：
- * - 触发线 1：文件写入匹配 trigger（glob→LLM→prompt）
+ * - 触发线 1：文件编辑审查（队列化：file.edited → 排队 → session.idle 批量注入）
  * - 触发线 2：连续无进展循环 + 无反馈环检测（滑动窗口→system.transform 注入）
  * - 触发线 4：主动联网查证（断言检测→分级计数器→system.transform 注入）
  * - 触发线 5：提交后知识提取（git commit 检测→LLM 分析→写入 blocks）
@@ -14,8 +14,9 @@
  *
  * 核心功能：
  * 1. system.transform：注入 blocks + triggers + 联网查证规则到 system prompt
- * 2. event：记录事件 + 断言检测 + websearch 追踪 + trigger 匹配
- * 3. 分析触发：新会话启动时检查增量，调用 LLM 自主学习用户习惯
+ * 2. event：记录事件 + 断言检测 + websearch 追踪 + 队列化审查 + session 结束处理
+ * 3. chat.message：同轮警告注入 + 习惯确认检测
+ * 4. 分析触发：新会话启动时检查增量，调用 LLM 自主学习用户习惯
  */
 
 import fs from "node:fs";

@@ -43,13 +43,13 @@ node deploy.mjs
 
 详细配置说明见下方 [部署](#部署) 章节。
 
-## 当前状态（2026-07-22）
+## 当前状态（2026-07-23）
 
 | 模块 | 版本 | 状态 |
 |------|------|------|
 | 双星系统 | V3.7 | ✅ skill 感知 + 修改审查 + 编码工程规范 + 工匠 LSP 深度 + 计划文档机制 |
 | agents-priority | — | ✅ AGENTS.md 中文规范始终位于 system prompt 最前面 |
-| 分形 Guardian | V3.5 | ✅ 五条触发线 + 三层记忆 + 自主知识记录 + 计划摘要注入 + .active.json 跨会话跟踪 |
+| 分形 Guardian | V3.6 | ✅ 五条触发线 + 三层记忆 + 自主知识记录 + 审查时机优化 + 习惯确认温和提醒 + 计划摘要注入 + .active.json 跨会话跟踪 |
 | opencode-acp | latest | ✅ 自适应上下文压缩（触发线 3 由 ACP 覆盖，分形不再重复实现） |
 | AGENTS.md | — | ✅ 全局行为规范 |
 | CC 规则隔离 | — | ✅ `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT=1` |
@@ -81,7 +81,7 @@ node deploy.mjs
   ├── system.transform     → 四条触发线的核心注入通道（规则注入 + 分级干预 + 知识索引）
   ├── chat.message         → 同轮消息注入（通过 assistant parts 检测 websearch 调用）
   ├── event                → 记录 message.updated/file.edited 等事件
-  ├── 触发线 1             → 文件写入匹配 trigger（三层漏斗：glob→LLM→prompt）
+  ├── 触发线 1             → 文件编辑审查（队列化：file.edited → 排队 → session.idle 批量注入）
   ├── 触发线 2             → 连续无进展循环（滑动窗口纯规则）
   ├── 触发线 3             → 上下文压力（由 opencode-acp 插件覆盖）
   ├── 触发线 4             → 主动联网查证（ASSERTION_RE + 分级计数器）
@@ -99,7 +99,7 @@ node deploy.mjs
 分形/agents/助理.md        ← 赛博分身 agent 参考定义（不再自动调用）
 分形/prompts/              ← 可定制 prompt 模板（core-rules/websearch-rules/assertion-reminder）
 分形/scripts/              ← CLI 工具：fractal-cli
-分形/设计.md               ← 设计文档（V3.2）
+分形/设计.md               ← 设计文档（V3.6）
 ```
 
 ## 内置技能（14 个）

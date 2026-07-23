@@ -55,7 +55,7 @@ function cmdStatus() {
   const paused = pauseFiles.map(f => f.replace(PAUSE_PREFIX, "").replace(".json", ""));
 
   console.log("═══════════════════════════════════════");
-  console.log("  分形 Guardian Agent V3.1");
+  console.log("  分形 Guardian Agent V3.6");
   console.log("═══════════════════════════════════════\n");
 
   // 触发线状态
