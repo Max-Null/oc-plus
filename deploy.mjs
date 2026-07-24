@@ -327,6 +327,22 @@ function main() {
   }
   console.log("");
 
+  // [5b] deploy helper .bat files
+  // 回滚.bat 放在 OC 配置根目录，双击即可恢复
+  const rollbackBat = path.join(__dirname, "回滚.bat");
+  const batDestDir = OC; // 放在 ~/.config/opencode/ 根目录
+  if (fs.existsSync(rollbackBat)) {
+    const batDest = path.join(batDestDir, "回滚.bat");
+    try {
+      fs.copyFileSync(rollbackBat, batDest);
+      stats.deployed.push("回滚.bat");
+      log("V", "回滚.bat (双击一键回滚)");
+    } catch (e) {
+      log("x", `回滚.bat — ${e.message}`);
+    }
+  }
+  console.log("");
+
   // [6/7] deploy prompt templates
   console.log("[6/7] deploying prompt templates...");
   copyDir(SRC.promptTemplates, DST.fractalPrompts, false);
