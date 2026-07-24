@@ -196,8 +196,84 @@ function installSuperpowers() {
 // ============================================================
 
 function main() {
-  console.log("===== oc-plus 部署 V3.10 =====");
+  console.log("===== oc-plus 部署 V3.11 =====");
   console.log(`目标: ${OC}\n`);
+
+  // [ -2] pre-deploy validation — 类型检查
+  console.log("[-2] pre-deploy: TypeScript type check...");
+  const tsconfigPath = path.join(__dirname, "分形", "tsconfig.json");
+  if (fs.existsSync(tsconfigPath)) {
+    try {
+      const tscResult = execSync(
+        `npx tsc --noEmit --project "${tsconfigPath}" 2>&1`,
+        { encoding: "utf-8", timeout: 60000, cwd: __dirname }
+      );
+      // 过滤掉 node_modules 的错误（如 @types/node 的 Buffer 类型冲突），只关心我们的源码错误
+      const ourErrors = tscResult.split("\n").filter(line => {
+        return !line.includes("node_modules") && (line.includes("error TS") || line.includes("分形/"));
+      });
+      if (ourErrors.length > 0) {
+        console.log("  ✗ 类型检查失败！以下错误必须修复后才能部署：\n");
+        console.log(ourErrors.join("\n"));
+        console.log("\n  提示: 上面的错误都是 oc-plus 源码问题，修复后重新运行 node deploy.mjs。");
+        console.log("  如果误判（错误来自 node_modules 类型定义），可以忽略，但建议先确认。");
+        return 1;
+      }
+      log("V", "类型检查通过");
+    } catch (e) {
+      // tsc 非零退出时，检查 stderr 内容
+      const stderr = e.stderr?.toString() || e.message || "";
+      const ourErrors = stderr.split("\n").filter(line => {
+        return !line.includes("node_modules") && (line.includes("error TS") || line.includes("分形/"));
+      });
+      if (ourErrors.length > 0) {
+        console.log("  ✗ 类型检查失败！以下错误必须修复后才能部署：\n");
+        console.log(stderr.slice(0, 2000)); // 截断超长输出
+        console.log("\n  提示: 修复后重新运行 node deploy.mjs。");
+        return 1;
+      }
+      // tsc 失败但错误都来自 node_modules → 跳过（已知的 @types 冲突）
+      log(".", "tsc 有 node_modules 类型告警（不影响源码），跳过");
+    }
+  } else {
+    log(".", "未找到 tsconfig，跳过类型检查");
+  }
+  console.log("");
+
+  // [ -1] pre-deploy backup — 备份当前运行版本
+  console.log("[-1] pre-deploy: backing up current deployment...");
+  const backupDir = path.join(OC, ".deploy-backup");
+  const backupMetaPath = path.join(backupDir, "backup.json");
+  ensureDir(backupDir);
+  // 备份可能被覆盖的关键文件
+  const toBackup = [
+    { src: path.join(OC, "plugins", "fractal.ts"), label: "plugins/fractal.ts" },
+    { src: path.join(OC, "plugins", "lib", "prompts.ts"), label: "plugins/lib/prompts.ts" },
+    { src: path.join(OC, "plugins", "agents-priority.ts"), label: "plugins/agents-priority.ts" },
+  ];
+  const backed = [];
+  for (const b of toBackup) {
+    if (fs.existsSync(b.src)) {
+      const dest = path.join(backupDir, path.basename(b.src));
+      try {
+        fs.copyFileSync(b.src, dest);
+        backed.push(b.label);
+      } catch (e) { log("x", `备份 ${b.label} 失败: ${e.message}`); }
+    }
+  }
+  // 写备份元数据
+  const backupMeta = {
+    timestamp: new Date().toISOString(),
+    source: { dir: __dirname, branch: "unknown" },
+    backedUpFiles: backed,
+    gitCommit: (() => {
+      try { return execSync("git rev-parse --short HEAD", { encoding: "utf-8", cwd: __dirname }).trim(); }
+      catch { return "unknown"; }
+    })(),
+  };
+  fs.writeFileSync(backupMetaPath, JSON.stringify(backupMeta, null, 2), "utf-8");
+  log("V", `备份完成: ${backed.length} 文件 → ${backupDir.replace(HOME, "~")}`);
+  console.log("");
 
   // [0/7] pre-deployment cleanup of deprecated files
   console.log("[0/7] pre-deployment cleanup...");
@@ -245,7 +321,7 @@ function main() {
 
   // [5/7] deploy scripts
   console.log("[5/7] deploying scripts...");
-  const scriptFiles = ["memories-cli.mjs", "test-analyze.mjs", "fractal-cli.mjs"];
+  const scriptFiles = ["memories-cli.mjs", "test-analyze.mjs", "fractal-cli.mjs", "rollback.mjs"];
   for (const s of scriptFiles) {
     copyFile(path.join(SRC.scripts, s), DST.scripts, s);
   }

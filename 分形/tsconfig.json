@@ -10,5 +10,5 @@
     "skipLibCheck": true,
     "declaration": true
   },
-  "include": ["fractal.ts", "lib/prompts.ts"]
+  "include": ["fractal.ts", "pipeline.ts", "pipeline.test.ts", "lib/prompts.ts"]
 }
