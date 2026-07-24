@@ -25,6 +25,7 @@ import os from "node:os";
 import crypto from "node:crypto";
 import { getSystemPrompt, getUserPrompt } from "./lib/prompts.js";
 
+import * as pipeline from "./pipeline.js";
 // ============================================================
 // 诊断模式：在 ~/.config/opencode/memories/.fractal-debug 创建空文件即可启用
 // 日志输出到 ~/.config/opencode/memories/fractal-startup.log + console
@@ -1522,6 +1523,11 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
     version: 0,
   };
 
+  // 流水线变量：门释放后激活，控制阶段流转
+  let pipelineState: pipeline.PipelineState | null = null;
+  let gateJustReleased = false;
+  let implementIdleTurns = 0;
+
   return {
     /**
      * 会话启动时：
@@ -1550,6 +1556,27 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
         const gatePrompt = `\n## ⚠️ 行为前门 v${alignmentGate.version}：先对齐，再动手\n\n在看到用户明确确认（如"开始实现""没问题做吧""go ahead"或"跳过对齐""直接做"）之前，禁止修改任何代码。你必须：\n\n1. **一次只问一个问题**，给出推荐答案后等待用户回复\n2. **能查到的事实自己去查**——从代码/文档/环境发现的信息不问用户\n3. **决策归属用户**——逐条确认，不跳过\n4. 按以下维度逐个质询（不限于此）：\n   a) 用户需要什么？（输入/输出/可观察行为）\n   b) 数据模型：什么持久化？什么瞬态？真相源在哪？\n   c) 边界情况和失败模式\n   d) 哪些文件/模块受影响？\n5. 所有维度覆盖完毕，用户确认后，输出「设计对齐，开始实现」——此时方可开始编码\n\n> 习惯确认、联网查证等分形规则在行为前门激活时仍需遵守。\n`;
         output.system.push(gatePrompt);
         debug(`行为前门: system.transform 注入 grill 指令 (v${alignmentGate.version})`);
+      }
+
+      // ---- 流水线：跨会话恢复 + 阶段指令注入 ----
+      if (!pipelineState) {
+        const restored = pipeline.readPipelineState();
+        if (restored && restored.status === "active") {
+          pipelineState = restored;
+          debug(`流水线: 跨会话恢复 — ${pipelineState.pipelineId} (${pipelineState.currentStage})`);
+        }
+      }
+      if (pipelineState && pipelineState.status === "active" && !alignmentGate.active) {
+        const f = pipelineState.context.feature;
+        const s = pipelineState.currentStage;
+        const c = pipelineState.complexity;
+        output.system.push(`\n> 🔄 流水线: ${f} | ${s} | ${c}`);
+        const sp = pipeline.getStageStartPrompt(pipelineState);
+        if (sp) output.system.push(`\n${sp}\n`);
+        if (s !== "idle" && pipelineState.stages[s]?.status === "active") {
+          const done = Object.entries(pipelineState.stages).filter(([, v]) => v.status === "completed").map(([n]) => n).join(" → ");
+          if (done) output.system.push(`\n已完成：${done}。继续当前阶段「${s}」。`);
+        }
       }
 
       // 触发线 4 + B：断言检测 — 分级注入跨轮提醒
@@ -1874,6 +1901,7 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
         if (alignmentGate.active && (isAlignmentConfirmation(userText) || isAlignmentSkip(userText))) {
           const wasSkip = isAlignmentSkip(userText);
           alignmentGate.active = false;
+          gateJustReleased = true;
           debug(`行为前门: ${wasSkip ? "跳过" : "确认"}释放 (v${alignmentGate.version})`);
         }
         // 激活检测——未激活时检测改动意图
@@ -1892,6 +1920,21 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
         }
       }
 
+
+      // ---- 流水线：逃课拦截 + 取消检测 ----
+      if (pipelineState && pipelineState.status === "active" && userText) {
+        if (pipeline.isStageSkipRequest(userText)) {
+          pendingWarnings.push(`🚫 ${pipeline.getStageSkipRejection(pipelineState.context.feature)}`);
+          debug("流水线: 拒绝逃课请求");
+        } else if (pipeline.isTaskCancelRequest(userText)) {
+          pipeline.clearPipelineState();
+          pipelineState = null;
+          gateJustReleased = false;
+          implementIdleTurns = 0;
+          pendingWarnings.push("流水线已取消。状态已清除。");
+          debug("流水线: 用户取消任务");
+        }
+      }
       // 检测"确认习惯"指令 → 加载 pending items 到 pendingWarnings，触发 question 确认流程
       if (userText && /确认习惯|确认pending/i.test(userText)) {
         try {
@@ -1987,6 +2030,21 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
             bashCalledThisTurn = false;
             editsThisTurn = 0;
             debug(`触发线4: 新用户消息 → 重置本轮标志`);
+
+            // ---- 流水线：IMPLEMENTING 阶段遗忘提醒 ----
+            if (pipelineState && pipelineState.currentStage === "implementing") {
+              if (editsThisTurn === 0) {
+                implementIdleTurns++;
+                if (implementIdleTurns === 5) {
+                  try { client.session.promptAsync({ text: "编码阶段似乎已完成。如果已完成，请输出「### 编码完成」。", }); } catch {/* */}
+                  debug(`流水线: implementing ${implementIdleTurns} 轮无编辑，注入提醒`);
+                } else if (implementIdleTurns >= 10) {
+                  try { client.session.promptAsync({ text: `编码阶段 ${implementIdleTurns} 轮无编辑。请输出完成信号或说明还需做什么。`, }); } catch {/* */}
+                }
+              } else {
+                implementIdleTurns = 0;
+              }
+            }
           }
 
           // 触发线 4：扫描 assistant 输出 → 分级计数而非简单标记
@@ -2014,6 +2072,42 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
                   incrementCounter(sessionID || "", snippet.trim());
                   debug(`触发线4: 断言检测命中且未查证 — ${snippet.trim().slice(0, 60)}`);
                 }
+              }
+            }
+
+            // ---- 流水线信号检测（assistant 消息） ----
+            if (gateJustReleased && pipeline.checkGateReleaseSignal(content)) {
+              gateJustReleased = false;
+              const ctx = pipeline.extractAlignmentContext(content);
+              if (ctx) {
+                pipelineState = pipeline.createPipelineState(ctx);
+                pipeline.writePipelineState(pipelineState);
+                debug(`流水线: 创建 — ${pipelineState.pipelineId} (${pipelineState.complexity})`);
+                const sec = pipeline.splitAlignmentOutput(content);
+                if (sec) {
+                  if (sec.llm) {
+                    const bf = path.join(BLOCKS_DIR, `${ctx.feature}-对齐共识.md`);
+                    try { fs.mkdirSync(BLOCKS_DIR, { recursive: true }); } catch {/* */}
+                    fs.writeFileSync(bf, sec.llm, "utf-8");
+                  }
+                  if (sec.human) {
+                    const dd = path.join(projectDir || ".", "doc", "知识", "对齐共识");
+                    const hf = path.join(dd, `${ctx.feature}.md`);
+                    try { fs.mkdirSync(dd, { recursive: true }); } catch {/* */}
+                    fs.writeFileSync(hf, sec.human, "utf-8");
+                  }
+                }
+              }
+            }
+            if (pipelineState && pipelineState.status === "active") {
+              if (pipelineState.currentStage === "designing" && pipeline.checkDesignDoneSignal(content)) {
+                pipelineState = pipeline.transitionToNextStage(pipelineState);
+                debug(`流水线: 设计完成 → ${pipelineState.currentStage}`);
+              } else if (pipelineState.currentStage === "implementing" && pipeline.checkImplementDoneSignal(content)) {
+                pipelineState = pipeline.transitionToNextStage(pipelineState);
+                implementIdleTurns = 0;
+                debug(`流水线: 编码完成 → ${pipelineState.currentStage}`);
+                try { client.session.promptAsync({ text: "编码完成。进入**交付审查**。" }); } catch {/* */}
               }
             }
           }
