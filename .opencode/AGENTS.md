@@ -14,12 +14,16 @@ oc-plus/
 │   ├── agents/         Agent 定义
 │   ├── commands/       自定义命令
 │   └── archive/        历史版本归档
-├── 分形/               ← Guard系统：多场景Guardian Agent + 自主知识记录
+├── 分形/               ← Guard系统：多场景Guardian Agent + Pipeline 流水线 + 自主知识记录
 │   ├── agents/         助理 agent
-│   ├── scripts/        CLI 工具
+│   ├── scripts/        CLI 工具（含 rollback.mjs 一键回滚）
+│   ├── prompts/        可定制 prompt 模板
+│   ├── lib/            prompts.ts 等库文件
 │   ├── fractal.ts      插件源码
-│   ├── prompts.ts      LLM prompt 模板
-│   └── 设计.md
+│   ├── pipeline.ts     流水线引擎（V1：行为前门 → 5 阶段编排）
+│   ├── pipeline.test.ts 流水线测试（26 用例）
+│   ├── tsconfig.json
+│   └── 机制说明.md
 ├── 技能/               ← 内置 skill：8 个 mxy-* + 6 个 omo-*
 ├── doc/                ← 项目文档
 │   ├── 知识/           CC vs OC 对比分析 + API 速查
@@ -29,7 +33,11 @@ oc-plus/
 ├── .opencode/          ← 项目级 OC 配置
 │   ├── AGENTS.md       本文件
 │   └── memories/       项目级记忆 blocks
-├── deploy.ps1          部署脚本
+├── deploy.mjs          部署脚本（主入口）
+├── deploy.ps1          部署脚本（PowerShell 包装器）
+├── 回滚.bat            双击一键回滚到上一个可用版本
+├── agents-priority.ts  AGENTS.md 排序插件
+├── opencode.json.example 配置模板
 ├── package.json
 └── README.md
 
@@ -41,7 +49,7 @@ oc-plus/
 | 目录 | 说明 |
 |------|------|
 | `双星系统/` | 双星 primary agent + 工匠/参谋/军师 subagent + commands |
-| `分形/` | 分形插件（三层记忆 + Guardian Agent + B 断言检测 + 自主知识记录） |
+| `分形/` | 分形插件（三层记忆 + Guardian Agent + Pipeline V1 流水线 + B 断言检测 + 自主知识记录） |
 | `技能/` | mxy-commit-review 等 14 个内置 skill |
 | `doc/知识/` | CC vs OC 对比 + OC Plugin API 速查 + Hooks 完整列表 + 加载机制 + 上下文插件 |
 

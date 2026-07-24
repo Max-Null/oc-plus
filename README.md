@@ -43,13 +43,13 @@ node deploy.mjs
 
 详细配置说明见下方 [部署](#部署) 章节。
 
-## 当前状态（2026-07-23）
+## 当前状态（2026-07-24）
 
 | 模块 | 版本 | 状态 |
 |------|------|------|
 | 双星系统 | V3.7 | ✅ skill 感知 + 修改审查 + 编码工程规范 + 工匠 LSP 深度 + 计划文档机制 |
 | agents-priority | — | ✅ AGENTS.md 中文规范始终位于 system prompt 最前面 |
-| 分形 Guardian | V3.6 | ✅ 五条触发线 + 三层记忆 + 自主知识记录 + 审查时机优化 + 习惯确认温和提醒 + 计划摘要注入 + .active.json 跨会话跟踪 |
+| 分形 Guardian | V3.7 | ✅ 六条触发线 + 三层记忆 + Pipeline V1 流水线（行为前门 → 5 阶段自动编排）+ 回滚保护 |
 | opencode-acp | latest | ✅ 自适应上下文压缩（触发线 3 由 ACP 覆盖，分形不再重复实现） |
 | AGENTS.md | — | ✅ 全局行为规范 |
 | CC 规则隔离 | — | ✅ `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT=1` |
@@ -86,7 +86,9 @@ node deploy.mjs
   ├── 触发线 3             → 上下文压力（由 opencode-acp 插件覆盖）
   ├── 触发线 4             → 主动联网查证（ASSERTION_RE + 分级计数器）
   ├── 触发线 5             → 提交后知识提取（轮询 git log → LLM 分析 → 写入 blocks/）
-  └── 频率控制             → knowledge/habits 每 5 轮注入，核心规则每轮注入
+  ├── 触发线 6             → 行为前门（改动意图检测→强制对齐→用户确认后释放）
+├── Pipeline V1          → 门释放后自动编排 5 阶段（对齐→设计→计划→实现→交付）
+├── 频率控制             → knowledge/habits 每 5 轮注入，核心规则每轮注入
 
 ~/.config/opencode/memories/
   ├── blocks/              ← 知识块（分形自动维护）
@@ -97,8 +99,8 @@ node deploy.mjs
   └── .commit-last-check.json ← 触发线 5 提交时间戳
 
 分形/agents/助理.md        ← 赛博分身 agent 参考定义（不再自动调用）
-分形/prompts/              ← 可定制 prompt 模板（core-rules/websearch-rules/assertion-reminder）
-分形/scripts/              ← CLI 工具：fractal-cli
+分形/prompts/              ← 可定制 prompt 模板（core-rules/websearch-rules/assertion-reminder/pipeline-stage-*）
+分形/scripts/              ← CLI 工具：fractal-cli, rollback.mjs
 分形/设计.md               ← 设计文档（V3.6）
 分形/机制说明.md            ← 机制说明 + 时序图（给人类用户看）
 ```
@@ -145,7 +147,9 @@ node deploy.mjs
 .\deploy.ps1
 ```
 
-脚本自动执行 8 步：清理过期文件 → 创建目录 → 部署 agent/plugin → 命令 → 脚本 → prompt 模板 → 技能 → 安装 superpowers。
+脚本自动执行 8 步：类型检查 → 备份当前版本 → 清理过期文件 → 创建目录 → 部署 agent/plugin → 命令 → 脚本 → prompt 模板 → 技能 → 安装 superpowers。
+
+> **回滚保护**：每次部署自动备份当前运行版本。如果部署后 OC 无法启动，双击 `~/.config/opencode/回滚.bat` 一键恢复。
 
 ### 手动配置
 
