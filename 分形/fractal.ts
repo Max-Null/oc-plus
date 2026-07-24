@@ -1,11 +1,11 @@
 /**
- * 分形 Plugin for OpenCode — v3.6
+ * 分形 Plugin for OpenCode — v3.7
  *
- * 五条触发线 Guardian Agent：
+ * 六条触发线 Guardian Agent：
  * - 触发线 1：文件编辑审查（队列化：file.edited → 排队 → session.idle 批量注入）
  * - 触发线 2：连续无进展循环 + 无反馈环检测（滑动窗口→system.transform 注入）
  * - 触发线 4：主动联网查证（断言检测→分级计数器→system.transform 注入）
- * - 触发线 5：提交后知识提取（git commit 检测→LLM 分析→写入 blocks）
+ * - 触发线 6：行为前门（改动意图检测→强制对齐→用户确认后释放，grill-me 理念融入分形）
  *
  * 三层记忆架构：
  * - 全局：~/.config/opencode/memories/
@@ -78,6 +78,68 @@ const ASSERTION_RE = /(?:不支持|做不到|只有\s*\d+\s*种|(?<!\S)(?:没有
 
 // 触发线 4：联网工具名检测（包含 websearch / webfetch 等）
 const WEBSEARCH_TOOLS = /websearch|web_search|webfetch/;
+
+// 触发线 6：行为前门 — 改动意图检测关键词
+const MODIFICATION_ACTION_WORDS = [
+  "修改", "改一下", "改下", "改一改", "改动", "重写", "rewrite",
+  "实现", "做", "开发", "开发一下", "implement",
+  "加", "加上", "增加", "新增", "添加", "补", "补充", "add",
+  "重构", "重构一下", "refactor", "rebuild",
+  "优化", "优化一下", "optimize",
+  "修复", "修一下", "fix",
+  "删除", "去掉", "移除", "清理", "remove", "delete",
+  "建", "创建", "新建", "create", "build",
+  "升级", "迁移", "替换", "upgrade", "migrate", "replace",
+  "调整", "配置", "config",
+  // 英文
+  "write", "implement", "build", "create", "add", "modify", "change", "update", "refactor",
+  "enhance", "improve", "install", "setup", "deploy",
+];
+const MODIFICATION_CONTEXT_WORDS = [
+  "功能", "代码", "模块", "组件", "接口", "页面", "逻辑",
+  "后端", "前端", "API", "store", "hook", "utils",
+  "函数", "方法", "变量", "类型", "class", "function",
+  "系统", "服务", "数据库", "DB", "UI",
+  "样式", "布局", "css", "scss", "风格",
+  "状态", "state", "路由", "权限", "认证",
+  "agent", "skill", "prompt", "mcp",
+  "分形", "fractal", "hook",
+  // 英文
+  "module", "component", "interface", "service", "controller", "middleware",
+  "plugin", "extension", "config", "settings", "feature",
+];
+// 跳过词：纯问答、审查、提交等操作不触发行为前门
+const GATE_SKIP_PATTERNS = [
+  // 怎么X：怎么办/怎么回/怎么样/怎么弄 → 纯问答，不激活
+  /^(为什么|怎么[办回样弄]|是什么|怎么回事|啥意思|什么意思)/,
+  /^(看看|看一下|查一下|检查|review|peek|explain|describe|what\s+is|what\s+does|how\s+does)/i,
+  /^(提交|commit)/i,
+  /^git\s/i,
+  /^(打开|查看目录|list|show|cat|read|open)/i,
+  /^(npm\s|pnpm\s|yarn\s|pip\s|cargo\s)/i,
+];
+
+/** 检测用户消息是否包含改动意图 */
+function isModificationRequest(text: string): boolean {
+  const lowerText = text.toLowerCase();
+  // 跳过纯问答或只读操作
+  if (GATE_SKIP_PATTERNS.some(p => p.test(text.trim()))) return false;
+  // 跳过 sign：用户主动发"跳过对齐""直接做"时，不重新激活门
+  if (/跳过对齐|直接做|不用问了|不用对齐|别问了|skip.*grill/i.test(text)) return false;
+  const hasAction = MODIFICATION_ACTION_WORDS.some(w => lowerText.includes(w));
+  const hasContext = MODIFICATION_CONTEXT_WORDS.some(w => lowerText.includes(w));
+  return hasAction && hasContext;
+}
+
+/** 检测用户是否确认可以开始实现 */
+function isAlignmentConfirmation(text: string): boolean {
+  return /开始实现|开始做|开始写|开始编码|开始build|确认.*实现|确认.*做|没问题.*做|go\s+ahead|proceed|设计对齐|可以.*开始|同意.*实现|可以.*编码/.test(text);
+}
+
+/** 检测用户是否主动跳过对齐 */
+function isAlignmentSkip(text: string): boolean {
+  return /跳过对齐|直接做|不用问了|不用对齐|别问了|skip.*grill|别bb|直接动手/.test(text);
+}
 
 // 触发线 4：计数器衰减阈值 — 连续 N 轮无断言后自动降级
 const COUNTER_DECAY_TURNS = 3;
@@ -1453,6 +1515,13 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
   // 知识注入精准度：捕获上轮用户消息，用于关键词匹配
   let lastUserMessage = "";
 
+  // 行为前门（V3.7）：检测改动意图 → 强制对齐 → 用户确认后释放
+  // 内存变量——对齐是瞬态的，跨重启不需保留
+  let alignmentGate: { active: boolean; version: number } = {
+    active: false,
+    version: 0,
+  };
+
   return {
     /**
      * 会话启动时：
@@ -1475,6 +1544,13 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
       const coreRules = loadPrompt("core-rules.md",
         `## 分形 v2.1\n**元知识记录**（手动 + 自主两路）\n…`);
       output.system.push(`\n${coreRules}\n`);
+
+      // ---- 触发线 6：行为前门（V3.7）——grill 对齐指令 ----
+      if (alignmentGate.active) {
+        const gatePrompt = `\n## ⚠️ 行为前门 v${alignmentGate.version}：先对齐，再动手\n\n在看到用户明确确认（如"开始实现""没问题做吧""go ahead"或"跳过对齐""直接做"）之前，禁止修改任何代码。你必须：\n\n1. **一次只问一个问题**，给出推荐答案后等待用户回复\n2. **能查到的事实自己去查**——从代码/文档/环境发现的信息不问用户\n3. **决策归属用户**——逐条确认，不跳过\n4. 按以下维度逐个质询（不限于此）：\n   a) 用户需要什么？（输入/输出/可观察行为）\n   b) 数据模型：什么持久化？什么瞬态？真相源在哪？\n   c) 边界情况和失败模式\n   d) 哪些文件/模块受影响？\n5. 所有维度覆盖完毕，用户确认后，输出「设计对齐，开始实现」——此时方可开始编码\n\n> 习惯确认、联网查证等分形规则在行为前门激活时仍需遵守。\n`;
+        output.system.push(gatePrompt);
+        debug(`行为前门: system.transform 注入 grill 指令 (v${alignmentGate.version})`);
+      }
 
       // 触发线 4 + B：断言检测 — 分级注入跨轮提醒
       const c = readCounter();
@@ -1791,6 +1867,30 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
         .map(p => p.text || "")
         .join(" ");
       if (userText) lastUserMessage = userText;
+
+      // ---- 触发线 6：行为前门（V3.7）----
+      if (userText) {
+        // 释放检测（优先级最高——用户说"开始实现"或"跳过"时立即释放）
+        if (alignmentGate.active && (isAlignmentConfirmation(userText) || isAlignmentSkip(userText))) {
+          const wasSkip = isAlignmentSkip(userText);
+          alignmentGate.active = false;
+          debug(`行为前门: ${wasSkip ? "跳过" : "确认"}释放 (v${alignmentGate.version})`);
+        }
+        // 激活检测——未激活时检测改动意图
+        else if (!alignmentGate.active && isModificationRequest(userText)) {
+          alignmentGate.active = true;
+          alignmentGate.version++;
+          debug(`行为前门: 激活 (v${alignmentGate.version})，消息: ${userText.slice(0, 80)}`);
+          // 首轮注入完整指令（system.transform 尚未看到 gate 状态）
+          pendingWarnings.push(
+            `行为前门 v${alignmentGate.version} 已激活 | ⚠️ 先对齐再动手——在看到用户确认前禁止修改代码。按维度逐个质询：需求→数据模型→边界→影响范围。全部确认后输出「设计对齐，开始实现」`
+          );
+        }
+        // 已激活但非释放——注入简短提醒（system.transform 已有完整指令）
+        else if (alignmentGate.active) {
+          pendingWarnings.push(`行为前门 v${alignmentGate.version} 仍在质询中 | ⚠️ 继续对齐（禁止编码），等待用户确认`);
+        }
+      }
 
       // 检测"确认习惯"指令 → 加载 pending items 到 pendingWarnings，触发 question 确认流程
       if (userText && /确认习惯|确认pending/i.test(userText)) {
