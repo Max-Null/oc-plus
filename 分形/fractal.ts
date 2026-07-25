@@ -1462,6 +1462,21 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
   try { fs.writeFileSync(path.join(MEMORIES_DIR, ".fractal-healthcheck"), JSON.stringify({ ts: new Date().toISOString(), pid: process.pid })); } catch {}
   ensureDir(MEMORIES_DIR);
   ensureDir(BLOCKS_DIR);
+  // 紧急救援：把所有记忆 blocks dump 到独立文件，分形崩溃后 --pure 模式也能读
+  try {
+    const dumpLines: string[] = [];
+    for (const mp of [path.join(MEMORIES_DIR, "blocks"), path.join(projectDir || "", ".opencode", "memories", "blocks")]) {
+      if (!fs.existsSync(mp)) continue;
+      for (const f of fs.readdirSync(mp)) {
+        if (!f.endsWith(".md")) continue;
+        const content = fs.readFileSync(path.join(mp, f), "utf-8");
+        dumpLines.push(`## ${f}\n\n${content}\n`);
+      }
+    }
+    if (dumpLines.length > 0) {
+      fs.writeFileSync(path.join(MEMORIES_DIR, "dump.md"), dumpLines.join("\n---\n"), "utf-8");
+    }
+  } catch { /* dump 失败不影响主流程 */ }
   ensureDir(TRIGGERS_DIR);
   rotateLog(DEBUG_LOG, 500 * 1024); // debug 日志上限 500KB
   rotateLog(EVENT_LOG); // 启动时检查一次事件日志
