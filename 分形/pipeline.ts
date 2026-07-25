@@ -88,7 +88,16 @@ const HUMAN_SECTION_END = "<!-- HUMAN_SECTION_END -->";
 
 /** 阶段完成信号关键字 */
 const DESIGN_DONE_RE = /### 设计完成/;
-const IMPLEMENT_DONE_RE = /### 编码完成/;
+
+/** 根据任务类型返回 implementing 阶段的完成信号正则 */
+function getImplementDoneRE(taskType: TaskType): RegExp {
+  switch (taskType) {
+    case "document": return /### 文档完成/;
+    case "ppt":      return /### PPT完成/;
+    case "data":     return /### 分析完成/;
+    default:         return /### 编码完成/;
+  }
+}
 
 /** 门释放确认关键字（与 fractal.ts isAlignmentConfirmation 保持一致） */
 const GATE_RELEASE_RE = /设计对齐/;
@@ -232,9 +241,9 @@ export function checkDesignDoneSignal(message: string): boolean {
   return DESIGN_DONE_RE.test(message);
 }
 
-/** 检测 Agent 是否输出了「编码完成」信号 */
-export function checkImplementDoneSignal(message: string): boolean {
-  return IMPLEMENT_DONE_RE.test(message);
+/** 检测 Agent 是否输出了 implementing 完成信号（根据任务类型匹配） */
+export function checkImplementDoneSignal(message: string, taskType: TaskType): boolean {
+  return getImplementDoneRE(taskType).test(message);
 }
 
 /** 检测门释放信号（对齐完成，Agent 输出「设计对齐」） */
@@ -340,7 +349,7 @@ export function isStageComplete(
 
   // implementing 阶段只检查 Agent 信号
   if (state.currentStage === "implementing") {
-    return lastAssistantMessage ? checkImplementDoneSignal(lastAssistantMessage) : false;
+    return lastAssistantMessage ? checkImplementDoneSignal(lastAssistantMessage, state.taskType) : false;
   }
 
   // planning 阶段检查 plans/ 目录下是否存在对应计划文件
@@ -440,15 +449,40 @@ export function getStageStartPrompt(state: PipelineState): string | null {
   const typeLabel = getTaskTypeLabel(state.taskType);
 
   switch (state.currentStage) {
-    case "designing":
+    case "designing": {
+      const isCodeTask = state.taskType === "web-app" || state.taskType === "plugin";
+      if (isCodeTask) {
+        return [
+          `行为前门对齐完成。现在进入**设计阶段**（任务类型：${typeLabel}）。`,
+          "",
+          `请使用 \`mxy-design-doc\` skill 为「${f}」创建设计方案。`,
+          `复杂度：${state.complexity === "simple" ? "简单（要点即可，1-2 段）" : "复杂（完整模板）"}。`,
+          "",
+          "完成后输出「### 设计完成」信号进入下一阶段。",
+        ].join("\n");
+      }
+      // 非编程任务：不用 skill，直接用步骤指引
+      const steps: Record<string, string> = {
+        document: "确定大纲 → 章节要点 → 边界约束 → 目标读者",
+        ppt: "确定页数 → 每页主题 → 数据来源",
+        data: "确定分析维度 → 图表类型 → 数据源",
+      };
+      const doneSignal: Record<string, string> = {
+        document: "### 设计完成",
+        ppt: "### 设计完成",
+        data: "### 设计完成",
+      };
+      const step = steps[state.taskType] || steps.document;
+      const signal = doneSignal[state.taskType] || doneSignal.document;
       return [
         `行为前门对齐完成。现在进入**设计阶段**（任务类型：${typeLabel}）。`,
         "",
-        `请使用 \`mxy-design-doc\` skill 为「${f}」创建设计方案。`,
-        `复杂度：${state.complexity === "simple" ? "简单（要点即可，1-2 段）" : "复杂（完整模板）"}。`,
+        `请为「${f}」完成设计：**${step}**。`,
+        `复杂度：${state.complexity === "simple" ? "简单（要点即可）" : "复杂（完整规划）"}。`,
         "",
-        "完成后输出「### 设计完成」信号进入下一阶段。",
+        `完成后输出「${signal}」信号进入下一阶段。`,
       ].join("\n");
+    }
 
     case "planning":
       return [
@@ -458,23 +492,63 @@ export function getStageStartPrompt(state: PipelineState): string | null {
         `每步 2-5 分钟可完成。${state.complexity === "simple" ? "3 步以内即可。" : "需要完整拆解。"}`,
       ].join("\n");
 
-    case "implementing":
+    case "implementing": {
+      const isCodeTask = state.taskType === "web-app" || state.taskType === "plugin";
+      if (isCodeTask) {
+        return [
+          `计划已确认。现在开始**编码实现**「${f}」。`,
+          "",
+          "按计划逐步实现，触发线 1 会自动审查每次文件编辑。",
+          "编码完成后输出「### 编码完成」信号进入审查阶段。",
+          "",
+          `注意：${state.complexity === "simple" ? "这是轻量功能，保持实现简洁。" : "这是复杂功能，注意边界处理和测试覆盖。"}`,
+        ].join("\n");
+      }
+      // 非编程任务：按类型给出执行指引
+      const steps: Record<string, string> = {
+        document: "按章节逐节撰写 → 插图 → 引用核实",
+        ppt: "按页逐页生成 → 数据可视化",
+        data: "写查询 → 生成图表 → 标注异常值",
+      };
+      const doneSignals: Record<string, string> = {
+        document: "### 文档完成",
+        ppt: "### PPT完成",
+        data: "### 分析完成",
+      };
+      const step = steps[state.taskType] || steps.document;
       return [
-        `计划已确认。现在开始**编码实现**「${f}」。`,
+        `计划已确认。现在开始**执行**「${f}」。`,
         "",
-        "按计划逐步实现，触发线 1 会自动审查每次文件编辑。",
-        "编码完成后输出「### 编码完成」信号进入审查阶段。",
+        `执行步骤：**${step}**。`,
+        `${state.complexity === "simple" ? "保持简洁，聚焦核心产出。" : "追求完整度，注意细节。"}`,
         "",
-        `注意：${state.complexity === "simple" ? "这是轻量功能，保持实现简洁。" : "这是复杂功能，注意边界处理和测试覆盖。"}`,
+        `完成后输出「${doneSignals[state.taskType]}」信号进入审查阶段。`,
       ].join("\n");
+    }
 
-    case "delivering":
+    case "delivering": {
+      const isCodeTask = state.taskType === "web-app" || state.taskType === "plugin";
+      if (isCodeTask) {
+        return [
+          `编码完成。现在进入**交付审查**。`,
+          "",
+          "请使用 `mxy-commit-review` skill 进行最终审查并提交。",
+          "审查通过后流水线自动完成。",
+        ].join("\n");
+      }
+      const checks: Record<string, string> = {
+        document: "格式审查：标题层级、错别字、引用链接、图片位置",
+        ppt: "视觉一致性检查：字体、颜色、图表比例",
+        data: "数据准确性校验：样本量、异常值、单位标注",
+      };
+      const check = checks[state.taskType] || checks.document;
       return [
-        `编码完成。现在进入**交付审查**。`,
+        `执行完成。现在进入**交付审查**。`,
         "",
-        "请使用 `mxy-commit-review` skill 进行最终审查并提交。",
+        `审查重点：**${check}**。`,
         "审查通过后流水线自动完成。",
       ].join("\n");
+    }
 
     default:
       return null;

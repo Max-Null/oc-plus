@@ -1462,6 +1462,13 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
   try { fs.writeFileSync(path.join(MEMORIES_DIR, ".fractal-healthcheck"), JSON.stringify({ ts: new Date().toISOString(), pid: process.pid })); } catch {}
   ensureDir(MEMORIES_DIR);
   ensureDir(BLOCKS_DIR);
+  ensureDir(TRIGGERS_DIR);
+  rotateLog(DEBUG_LOG, 500 * 1024); // debug 日志上限 500KB
+  rotateLog(EVENT_LOG); // 启动时检查一次事件日志
+
+  const projectDir = input.directory || undefined;
+  const { client } = input;
+
   // 紧急救援：把所有记忆 blocks dump 到独立文件，分形崩溃后 --pure 模式也能读
   try {
     const dumpLines: string[] = [];
@@ -1477,12 +1484,6 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
       fs.writeFileSync(path.join(MEMORIES_DIR, "dump.md"), dumpLines.join("\n---\n"), "utf-8");
     }
   } catch { /* dump 失败不影响主流程 */ }
-  ensureDir(TRIGGERS_DIR);
-  rotateLog(DEBUG_LOG, 500 * 1024); // debug 日志上限 500KB
-  rotateLog(EVENT_LOG); // 启动时检查一次事件日志
-
-  const projectDir = input.directory || undefined;
-  const { client } = input;
 
   // 触发线 4：本轮是否已检测到断言（避免重复计数同一轮多次 content chunk）
   let assertionDetectedThisTurn = false;
@@ -2160,7 +2161,7 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
               if (pipelineState.currentStage === "designing" && pipeline.checkDesignDoneSignal(content)) {
                 pipelineState = pipeline.transitionToNextStage(pipelineState);
                 debug(`流水线: 设计完成 → ${pipelineState.currentStage}`);
-              } else if (pipelineState.currentStage === "implementing" && pipeline.checkImplementDoneSignal(content)) {
+              } else if (pipelineState.currentStage === "implementing" && pipeline.checkImplementDoneSignal(content, pipelineState.taskType)) {
                 pipelineState = pipeline.transitionToNextStage(pipelineState);
                 implementIdleTurns = 0;
                 debug(`流水线: 编码完成 → ${pipelineState.currentStage}`);

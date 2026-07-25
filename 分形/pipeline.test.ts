@@ -202,7 +202,7 @@ describe("阶段完成信号检测", () => {
   });
 
   it("「### 编码完成」→ true", () => {
-    assert.strictEqual(checkImplementDoneSignal("### 编码完成\n```json\n{}\n```"), true);
+    assert.strictEqual(checkImplementDoneSignal("### 编码完成\n```json\n{}\n```", "web-app"), true);
   });
 
   it("门释放「设计对齐」→ true", () => {
