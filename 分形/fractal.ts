@@ -228,9 +228,9 @@ function rotateLog(logPath: string, maxSize: number = MAX_LOG_SIZE) {
     if (!fs.existsSync(logPath)) return;
     const stat = fs.statSync(logPath);
     if (stat.size <= maxSize) return;
-    // 保留最近 100KB 的事件
+    // 保留阈值一半大小的最近日志，留 50% 余量避免边界振荡
     const content = fs.readFileSync(logPath, "utf-8");
-    const keepSize = Math.min(maxSize, stat.size);
+    const keepSize = Math.floor(maxSize / 2);
     const tail = content.slice(-keepSize);
     // 从第一个完整行开始保留
     const firstNewline = tail.indexOf("\n");
@@ -297,7 +297,7 @@ function extractKeywords(text: string): string[] {
 function getActivePlanSummaries(): string[] {
   try {
     if (!fs.existsSync(PLANS_DIR)) return [];
-    const files = fs.readdirSync(PLANS_DIR).filter(f => f.endsWith(".md"));
+    const files = fs.readdirSync(PLANS_DIR).filter((f: string) => f.endsWith(".md"));
     if (files.length === 0) return [];
 
     const summaries: string[] = [];
@@ -691,7 +691,7 @@ function getNewEvents(): string[] {
   const last = getLastAnalysis();
   const lines = fs.readFileSync(EVENT_LOG, "utf-8").split("\n").filter(Boolean);
   const newLines = last.ts
-    ? lines.filter(line => {
+    ? lines.filter((line: string) => {
         try {
           const lastTs = last.ts as string; // 三元表达式已过滤 null，闭包内需显式断言
           return JSON.parse(line).ts > lastTs;
@@ -706,7 +706,7 @@ async function getApiConfig(): Promise<{ apiKey: string; baseURL: string; model:
   // 读配置失败时等待 200ms 后重试一次，两次都失败才返回 null
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const raw = fs.readFileSync(configPath, "utf-8");
+      const raw = fs.readFileSync(configPath, "utf-8").replace(/^\uFEFF/, "");
       const config = JSON.parse(raw);
       // 解析 provider:model 格式（如 "ds:deepseek-v4-pro"），取 provider 名和模型名
       const fullModel = String(config.model || "");
@@ -752,18 +752,98 @@ async function getApiConfig(): Promise<{ apiKey: string; baseURL: string; model:
 }
 
 /**
+ * 通用 LLM 调用辅助函数——含 thinking 参数降级逻辑
+ *
+ * 背景：DeepSeek V4 Flash 在某些参数组合下拒绝 `thinking: { type: "disabled" }`，
+ * 返回 HTTP 400（"thinking options type cannot be disabled when reasoning_effort is set"）。
+ * 此函数先尝试带 thinking: disabled 的请求（节省 token + 保证 temperature 生效），
+ * 若 HTTP 400 且错误信息包含 "thinking"，则自动降级重试（移除 thinking 参数）。
+ *
+ * @param body    请求体（不含 model，callLLM 自动注入），thinking 参数由本函数控制
+ * @param debugPrefix  日志前缀，用于区分不同调用场景
+ * @param timeoutMs   超时毫秒数
+ * @returns LLM 返回的文本内容，失败返回 null
+ */
+async function callLLM(
+  body: Record<string, unknown>,
+  debugPrefix: string,
+  timeoutMs: number = 30000,
+): Promise<string | null> {
+  const config = await getApiConfig();
+  if (!config) {
+    debug(`FRACTAL: 无法获取 API 配置，跳过 (${debugPrefix})`);
+    return null;
+  }
+
+  /** 单次 fetch 尝试，返回 { ok, data, retryable } */
+  async function doFetch(reqBody: Record<string, unknown>): Promise<{
+    ok: boolean; data: string | null; retryable: boolean;
+  }> {
+    const c = config!; // 外层已 if (!config) return null 收窄，闭包内需显式断言
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    let response: Response;
+    try {
+      response = await fetch(`${c.baseURL}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${c.apiKey}`,
+        },
+        body: JSON.stringify({ model: c.model, ...reqBody }),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
+    if (response.ok) {
+      const data = await response.json() as {
+        choices?: Array<{ message?: { content?: string } }>;
+      };
+      const content = data.choices?.[0]?.message?.content || null;
+      // V3.8.1 诊断：记录 LLM 调用成功时的请求/响应摘要
+      const reqSize = JSON.stringify(reqBody).length;
+      debug(`${debugPrefix}: ✓ LLM 响应 ${content?.length || 0} bytes（请求 ${reqSize} chars）`);
+      if (content && content.length > 0) {
+        debug(`${debugPrefix}: [DIAG] 响应前 200 chars: ${content.slice(0, 200)}`);
+      }
+      return { ok: true, data: content, retryable: false };
+    }
+
+    // 读取错误响应体，用于诊断和降级判断
+    let errorBody = "";
+    try { errorBody = await response.text(); } catch { /* 读取失败忽略 */ }
+    debug(`${debugPrefix}: LLM 调用失败 HTTP ${response.status} — ${errorBody.slice(0, 500)}`);
+
+    // 仅 thinking 参数导致的 HTTP 400 可降级重试
+    const isThinkingConflict = response.status === 400 &&
+      /thinking/i.test(errorBody);
+    return { ok: false, data: null, retryable: isThinkingConflict };
+  }
+
+  // 第一次尝试：带 thinking: disabled（节省 token，保证 temperature 确定性）
+  const firstBody = { ...body, thinking: { type: "disabled" } };
+  const first = await doFetch(firstBody);
+  if (first.ok) return first.data;
+  if (!first.retryable) return null;
+
+  // 降级重试：移除 thinking 参数（兼容不支持 disabled 的模型/端点组合）
+  debug(`${debugPrefix}: thinking 参数不兼容，降级重试（移除 thinking）...`);
+  const second = await doFetch(body);
+  if (second.ok) {
+    debug(`${debugPrefix}: 降级重试成功 ✓（已适配当前模型）`);
+  }
+  return second.data;
+}
+
+/**
  * 调用 LLM 自主学习用户习惯（分形分析模式）
  *
  * 与 Phase 2 的区别：不预定义输出格式，
  * LLM 自主决定发现什么类型的习惯、以什么格式存储。
  */
 async function analyzeAndUpdate(eventLines: string[], memoryPaths: string[]): Promise<string | null> {
-  const config = await getApiConfig();
-  if (!config) {
-    debug(`FRACTAL: 无法获取 API 配置，跳过分析`);
-    return null;
-  }
-
   // 准备事件摘要
   const eventSummary = eventLines
     .map(line => {
@@ -805,52 +885,24 @@ async function analyzeAndUpdate(eventLines: string[], memoryPaths: string[]): Pr
 
   const userPrompt = getUserPrompt(existingBlocks, existingTriggers, eventSummary.length, JSON.stringify(eventSummary, null, 2), memoryPaths);
 
-  try {
-    debug(`FRACTAL: 调用 LLM 分析 ${eventSummary.length} 条事件...`);
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s 超时，防止阻塞
-    const response = await fetch(`${config.baseURL}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${config.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: config.model,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userPrompt },
-        ],
-        temperature: 0.3,
-        max_tokens: 4000,
-        thinking: { type: "disabled" },
-      }),
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-
-    if (!response.ok) {
-      // 增强错误日志，记录 response body 的前 500 字符帮助诊断
-      let errorBody = "";
-      try {
-        errorBody = await response.text();
-      } catch { /* 读取失败忽略 */ }
-      debug(`FRACTAL: LLM 调用失败 HTTP ${response.status} — ${errorBody.slice(0, 500)}`);
-      return null;
-    }
-
-    const data = await response.json() as {
-      choices?: Array<{ message?: { content?: string } }>;
-    };
-    const result = data.choices?.[0]?.message?.content || null;
-    if (result) {
-      debug(`FRACTAL: LLM 返回 ${result.length} bytes`);
-    }
-    return result;
-  } catch (err) {
-    debug(`FRACTAL: LLM 调用异常 ${String(err)}`);
-    return null;
+  debug(`FRACTAL: 调用 LLM 分析 ${eventSummary.length} 条事件...`);
+  // 使用 callLLM 辅助函数，含 thinking 参数降级逻辑（HTTP 400 → 移除 thinking 重试）
+  const result = await callLLM(
+    {
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
+      temperature: 0.3,
+      max_tokens: 4000,
+    },
+    "FRACTAL（事件分析）",
+    30000,
+  );
+  if (result) {
+    debug(`FRACTAL: LLM 返回 ${result.length} bytes`);
   }
+  return result;
 }
 
 /**
@@ -862,8 +914,7 @@ async function llmRerankKnowledge(
   userMessage: string,
   candidates: Array<{ item: any; relevance: number }>,
 ): Promise<Array<{ item: any; relevance: number }> | null> {
-  const config = await getApiConfig();
-  if (!config || candidates.length === 0) return null;
+  if (candidates.length === 0) return null;
 
   // 构造候选摘要：每条一行，格式为 "索引: 描述"
   const candidateLines = candidates.map((c, i) => {
@@ -873,53 +924,37 @@ async function llmRerankKnowledge(
 
   const prompt = `用户当前消息：${userMessage.slice(0, 200)}\n\n候选知识列表：\n${candidateLines}\n\n从以上候选中选出与用户消息最相关的条目，按相关性从高到低排列。返回纯数字索引列表，用逗号分隔（如 "3,0,4,1,2"），只输出索引不要任何其他文字。最多返回 5 条。`;
 
-  try {
-    debug(`FRACTAL: LLM 重排 ${candidates.length} 条知识候选...`);
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 3000); // 3s 超时，不阻塞主流程
-    const response = await fetch(`${config.baseURL}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${config.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: config.model,
-        messages: [{ role: "user", content: prompt }],
-        temperature: 0,
-        max_tokens: 50,
-        thinking: { type: "disabled" },
-      }),
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
+  debug(`FRACTAL: LLM 重排 ${candidates.length} 条知识候选...`);
+  // 使用 callLLM 辅助函数，含 thinking 参数降级逻辑；3s 超时（不阻塞主流程）
+  const result = await callLLM(
+    {
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0,
+      max_tokens: 50,
+    },
+    "FRACTAL（知识重排）",
+    3000,
+  );
+  if (!result) return null;
 
-    if (!response.ok) return null;
-    const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
-    const result = data.choices?.[0]?.message?.content?.trim();
-    if (!result) return null;
+  // 解析 LLM 返回的索引列表（如 "3,0,4,1,2"）
+  const indices = result.split(/[,，\s]+/).map(s => parseInt(s, 10)).filter(n => !isNaN(n) && n < candidates.length);
+  if (indices.length === 0) return null;
 
-    // 解析 LLM 返回的索引列表（如 "3,0,4,1,2"）
-    const indices = result.split(/[,，\s]+/).map(s => parseInt(s, 10)).filter(n => !isNaN(n) && n < candidates.length);
-    if (indices.length === 0) return null;
-
-    // 按 LLM 给出的顺序重排，兜底保留未选中的原始顺序
-    const seen = new Set<number>();
-    const reranked: Array<{ item: any; relevance: number }> = [];
-    for (const idx of indices) {
-      if (!seen.has(idx)) {
-        reranked.push(candidates[idx]);
-        seen.add(idx);
-      }
+  // 按 LLM 给出的顺序重排，兜底保留未选中的原始顺序
+  const seen = new Set<number>();
+  const reranked: Array<{ item: any; relevance: number }> = [];
+  for (const idx of indices) {
+    if (!seen.has(idx)) {
+      reranked.push(candidates[idx]);
+      seen.add(idx);
     }
-    // 把 LLM 没提到的候补追加在后面
-    for (let i = 0; i < candidates.length; i++) {
-      if (!seen.has(i)) reranked.push(candidates[i]);
-    }
-    return reranked;
-  } catch {
-    return null; // 超时或其他异常，回退到关键词排序
   }
+  // 把 LLM 没提到的候补追加在后面
+  for (let i = 0; i < candidates.length; i++) {
+    if (!seen.has(i)) reranked.push(candidates[i]);
+  }
+  return reranked;
 }
 
 /**
@@ -1077,12 +1112,6 @@ async function generateTriggerMessage(
   filePath: string,
   trigger: { fullContent: string; humanDescription: string; confidence: string; matchGlobs: string }
 ): Promise<string | null> {
-  const config = await getApiConfig();
-  if (!config) {
-    debug("TRIGGER: 无法获取 API 配置，跳过 LLM 语义判断");
-    return null;
-  }
-
   const filename = path.basename(filePath);
   const systemPrompt = `你是用户的赛博分身。你像用户一样思考。
 
@@ -1110,49 +1139,26 @@ ${trigger.fullContent}
 
 返回纯文本（不要 JSON 包裹）。`;
 
-  try {
-    debug(`TRIGGER: 调 LLM 语义判断 — ${filename} (习惯: ${trigger.humanDescription})`);
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s 超时
-    const response = await fetch(`${config.baseURL}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${config.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: config.model,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: `文件路径：${filePath}` },
-        ],
-        temperature: 0.3,
-        max_tokens: 500,
-        thinking: { type: "disabled" },
-      }),
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-
-    if (!response.ok) {
-      debug(`TRIGGER: LLM 调用失败 HTTP ${response.status}`);
-      return null;
-    }
-
-    const data = await response.json() as {
-      choices?: Array<{ message?: { content?: string } }>;
-    };
-    const result = data.choices?.[0]?.message?.content || null;
-    if (!result || result.trim() === "") {
-      debug("TRIGGER: LLM 判断不匹配，静默跳过");
-      return null;
-    }
-    debug(`TRIGGER: LLM 返回 ${result.length} bytes`);
-    return result.trim();
-  } catch (err) {
-    debug(`TRIGGER: LLM 调用异常 ${String(err)}`);
+  debug(`TRIGGER: 调 LLM 语义判断 — ${filename} (习惯: ${trigger.humanDescription})`);
+  // 使用 callLLM 辅助函数，含 thinking 参数降级逻辑；15s 超时
+  const result = await callLLM(
+    {
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: `文件路径：${filePath}` },
+      ],
+      temperature: 0.3,
+      max_tokens: 500,
+    },
+    "TRIGGER（语义判断）",
+    15000,
+  );
+  if (!result || result.trim() === "") {
+    debug("TRIGGER: LLM 判断不匹配，静默跳过");
     return null;
   }
+  debug(`TRIGGER: LLM 返回 ${result.length} bytes`);
+  return result.trim();
 }
 
 // ============================================================
@@ -1404,9 +1410,6 @@ async function checkAndExtractCommitKnowledge(
 
   // 调用 LLM 分析
   try {
-    const config = await getApiConfig();
-    if (!config) return;
-
     // 读取已有知识防止重复
     let existing = "";
     try {
@@ -1419,24 +1422,15 @@ async function checkAndExtractCommitKnowledge(
 
     const prompt = `你是知识提取器。分析以下 git commit，判断是否存在值得记录的知识点。\n规则：日常编码提交返回 {"action":"skip"}；涉及工具/框架踩坑经验、配置技巧、API 发现时提取为知识。知识用中文摘要，≤15行，格式：事实→原则→反例→结论。文件名小写英文+连字符。\n\n现有知识（避免重复）：${existing.slice(0, 2000) || "（无）"}\n\n提交信息：${commitMsg.slice(0, 500)}\n\n改动文件：${changedFiles.slice(0, 500)}\n\n回复纯JSON：{"action":"skip"} 或 {"action":"create","items":[{"file":"xx.md","memPath":0,"content":"<!-- type:knowledge -->...","reason":"为什么"}]}`;
 
-    const controller = new AbortController();
-    const to = setTimeout(() => controller.abort(), 30000);
-    const resp = await fetch(`${config.baseURL}/chat/completions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${config.apiKey}` },
-      body: JSON.stringify({
-        model: config.model,
+    // 使用 callLLM 辅助函数，含 thinking 参数降级逻辑
+    const json = await callLLM(
+      {
         messages: [{ role: "user", content: prompt }],
-        temperature: 0.3, max_tokens: 2000,
-        thinking: { type: "disabled" },
-      }),
-      signal: controller.signal,
-    });
-    clearTimeout(to);
-    if (!resp.ok) return;
-
-    const data = await resp.json() as { choices?: Array<{ message?: { content?: string } }> };
-    let json = data.choices?.[0]?.message?.content || "";
+        temperature: 0.3,
+        max_tokens: 2000,
+      },
+      "触发线5（知识提取）",
+    );
     if (!json) return;
 
     let parsed: any;
@@ -1464,6 +1458,8 @@ async function checkAndExtractCommitKnowledge(
 
 export const FractalPlugin = async (input: PluginInput, _options?: Record<string, unknown>) => {
   _fractalDebug("FACTORY: called");
+  // 启动自检：写入标记文件，用户重启后检查此文件确认分形已加载
+  try { fs.writeFileSync(path.join(MEMORIES_DIR, ".fractal-healthcheck"), JSON.stringify({ ts: new Date().toISOString(), pid: process.pid })); } catch {}
   ensureDir(MEMORIES_DIR);
   ensureDir(BLOCKS_DIR);
   ensureDir(TRIGGERS_DIR);
@@ -1493,8 +1489,14 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
 
   // 双通道注入：chat.message 同轮警告（比 system.transform 跨轮提醒更即时）
   let pendingWarnings: string[] = [];
+  const MAX_PENDING_WARNINGS = 4; // 队列上限：chat.message 多次触发时防止无限累积
+  function queueWarning(msg: string) {
+    if (pendingWarnings.length < MAX_PENDING_WARNINGS) pendingWarnings.push(msg);
+  }
   /** 文件编辑审查队列：file.edited 入队 → session.idle 批量消费 */
   let pendingReviewQueue: Array<{ filePath: string; trigger: { fullContent: string; humanDescription: string; confidence: string; matchGlobs: string }; sessionID: string }> = [];
+  /** 习惯确认去重：每进程只注入一次，避免刷屏 */
+  let _habitReminderInjected = false;
 
   /** mergeBlocksAndTriggers 5 秒缓存（避免 session.idle + chat.message 重复 IO） */
   let _blocksCache: { blocks: any[]; triggers: any[] } | null = null;
@@ -1829,6 +1831,9 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
         );
       }
 
+      // 注入 pending habits 提醒：仅通过 session.idle 事件路径注入独立消息
+      // system.transform 不负责习惯确认（避免 prompt 污染 + 用户不可见）
+
       if (triggers.length > 0) {
         const skipped = (!isNudgeTurn && matchedCount === 0) ? " (间隔跳过注入)" : (!isNudgeTurn && matchedCount > 0 ? ` (关键词命中${matchedCount}条，立即注入)` : "");
         const trimInfo = scored.length > topKnowledge.length ? ` 截断${scored.length - topKnowledge.length}条` : "";
@@ -1873,6 +1878,46 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
         output.system.push(planSection);
         debug(`注入 ${plans.length} 个计划摘要`);
       }
+
+      // ---- pendingWarnings 注入（V3.8）：从 chat.message 迁移 ----
+      // 原 chat.message 用 output.parts.unshift() 注入，但 OC 的 Session.updatePart
+      // 在 plugin-pushed parts 上找不到 sessionID → 抛异常 → 会话中断
+      // 改为注入到 system prompt（同轮可见，延迟极小）
+      // V3.8.1：限制注入总大小（≤500字符），避免 prompt 过大导致 API 拒绝
+      if (pendingWarnings.length > 0) {
+        const fullWarningText = pendingWarnings.join(" | ");
+        const MAX_WARNING_CHARS = 500;
+        let warningText = fullWarningText;
+        if (fullWarningText.length > MAX_WARNING_CHARS) {
+          // 截断到最近的警告，保留最后一条完整
+          const last = pendingWarnings[pendingWarnings.length - 1];
+          warningText = last.length > MAX_WARNING_CHARS
+            ? last.slice(0, MAX_WARNING_CHARS) + "…"
+            : "…" + fullWarningText.slice(fullWarningText.length - MAX_WARNING_CHARS);
+        }
+        output.system.push(`\n[分形 Guardian] ${warningText}\n`);
+        debug(`system.transform 注入 ${pendingWarnings.length} 条 pending 警告（${warningText.length} chars）`);
+        // V3.8.1 诊断：记录截断前的完整内容，用于优化注入机制
+        if (fullWarningText.length > MAX_WARNING_CHARS) {
+          debug(`[DIAG] pendingWarnings 截断前完整内容（${fullWarningText.length} chars）：${fullWarningText.slice(0, 300)}…${fullWarningText.slice(-100)}`);
+        }
+        pendingWarnings = [];
+      }
+
+      // V3.8.1 诊断：记录完整 system prompt 结构（发给 LLM 前）
+      {
+        const sections = output.system.map((s, i) => {
+          const preview = s.slice(0, 60).replace(/\n/g, "↵");
+          return `  [${i}] ${s.length} chars: ${preview}…`;
+        });
+        const totalChars = output.system.join("\n").length;
+        const totalTokens = Math.ceil(totalChars / 3.5);
+        debug(`[DIAG] system.prompt 结构（${output.system.length} 段，${totalChars} chars ≈ ${totalTokens} tokens）：`);
+        for (const line of sections) debug(line);
+        if (totalChars > 15000) {
+          debug(`[DIAG] ⚠️ system.prompt 超过 15K chars，可能触发 API 限制`);
+        }
+      }
     },
 
     /**
@@ -1910,13 +1955,13 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
           alignmentGate.version++;
           debug(`行为前门: 激活 (v${alignmentGate.version})，消息: ${userText.slice(0, 80)}`);
           // 首轮注入完整指令（system.transform 尚未看到 gate 状态）
-          pendingWarnings.push(
+          queueWarning(
             `行为前门 v${alignmentGate.version} 已激活 | ⚠️ 先对齐再动手——在看到用户确认前禁止修改代码。按维度逐个质询：需求→数据模型→边界→影响范围。全部确认后输出「设计对齐，开始实现」`
           );
         }
         // 已激活但非释放——注入简短提醒（system.transform 已有完整指令）
         else if (alignmentGate.active) {
-          pendingWarnings.push(`行为前门 v${alignmentGate.version} 仍在质询中 | ⚠️ 继续对齐（禁止编码），等待用户确认`);
+          queueWarning(`行为前门 v${alignmentGate.version} 仍在质询中 | ⚠️ 继续对齐（禁止编码），等待用户确认`);
         }
       }
 
@@ -1924,14 +1969,14 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
       // ---- 流水线：逃课拦截 + 取消检测 ----
       if (pipelineState && pipelineState.status === "active" && userText) {
         if (pipeline.isStageSkipRequest(userText)) {
-          pendingWarnings.push(`🚫 ${pipeline.getStageSkipRejection(pipelineState.context.feature)}`);
+          queueWarning(`🚫 ${pipeline.getStageSkipRejection(pipelineState.context.feature)}`);
           debug("流水线: 拒绝逃课请求");
         } else if (pipeline.isTaskCancelRequest(userText)) {
           pipeline.clearPipelineState();
           pipelineState = null;
           gateJustReleased = false;
           implementIdleTurns = 0;
-          pendingWarnings.push("流水线已取消。状态已清除。");
+          queueWarning("流水线已取消。状态已清除。");
           debug("流水线: 用户取消任务");
         }
       }
@@ -1952,20 +1997,17 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
             const list = pendingItems.map(p => `- **${p.desc}**（建议：${p.status}·${levelName(p.mp)}）`).join("\n");
             const firstDesc = pendingItems[0].desc;
             const confirmMsg = `分形习惯确认：用户想确认以下 ${pendingItems.length} 条待定习惯。请使用 question 工具逐条确认，格式：\n{ "questions": [{ "question": "分形发现了习惯「${firstDesc}」，是否保存？", "header": "确认习惯", "options": [{"label": "自动·全局", "description": "所有项目适用"}, {"label": "自动·本项目", "description": "仅当前项目"}, {"label": "建议·全局", "description": "观察中，所有项目"}, {"label": "建议·本项目", "description": "观察中，仅本项目"}, {"label": "不保存", "description": "跳过此习惯"}] }] }\n待确认项：\n${list}\n确认后：1. 根据选项编辑 blocks/*.md 的 status 为 auto/suggest 2. 层级不匹配则移动文件 3. 选跳过则删除文件`;
-            pendingWarnings.push(confirmMsg);
+            queueWarning(confirmMsg);
           } else {
-            pendingWarnings.push("分形：当前无待确认习惯。");
+            queueWarning("分形：当前无待确认习惯。");
           }
         } catch { /* 静默 */ }
       }
 
+      // pendingWarnings 已迁移至 system.transform 注入（V3.8）
+      // 原因：output.parts.unshift() 导致 OC Session.updatePart 找不到 sessionID → 会话中断
       if (pendingWarnings.length > 0) {
-        const warningText = `\n[分形 Guardian] ${pendingWarnings.join(" | ")}\n`;
-        if (output.parts) {
-          output.parts.unshift({ type: "text", text: warningText, synthetic: true });
-        }
-        debug(`双通道注入: chat.message 注入 ${pendingWarnings.length} 条警告`);
-        pendingWarnings = []; // 一次性消费
+        debug(`chat.message: 已排队 ${pendingWarnings.length} 条警告（等待 system.transform 注入）`);
       }
     },
 
@@ -2126,20 +2168,23 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
         queueFileEditReview(event.properties);
       }
 
-      // 会话空闲/完成：消费审查队列 + 习惯确认温和提醒
-      if (event.type === "session.idle") {
-        onSessionEnd(event.properties);
-      }
-      // session.status 是 session.idle 的推荐替代，等价处理 + 记录日志供验证
-      if (event.type === "session.status") {
-        debug(`HOOK: session.status fired — ${JSON.stringify(event.properties)}`);
-        onSessionEnd(event.properties);
-      }
-
       // 会话结束时的统一处理（去重由 session.idle + session.status 各自的触发频率保证）
       function onSessionEnd(props?: Record<string, unknown>) {
         flushReviewQueue(props);
         injectPendingHabitReminder(props);
+      }
+
+      // 会话空闲/完成：消费审查队列 + 习惯确认温和提醒
+      if (event.type === "session.idle") {
+        onSessionEnd(event.properties);
+      }
+      // session.status 的 busy 状态在回答中途多次触发，只在 idle 时消费队列和提醒
+      if (event.type === "session.status") {
+        const statusType = (event.properties as any)?.status?.type;
+        debug(`HOOK: session.status fired — ${JSON.stringify(event.properties)}`);
+        if (statusType === "idle") {
+          onSessionEnd(event.properties);
+        }
       }
 
       // 队列化：glob 预筛选 → 入队（不做 LLM 调用，不打断回复）
@@ -2203,12 +2248,16 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
         }
       }
 
-      // session 结束时注入待确认习惯提醒（温和，不阻断 agent 流程）
+      // session 结束时注入习惯确认消息（promptAsync 是 OC 1.18.x 唯一可靠的可视路径）
       function injectPendingHabitReminder(endProps?: Record<string, unknown>) {
         try {
+          if (_habitReminderInjected) return;
+          _habitReminderInjected = true;
+
           const { blocks, triggers: allTriggers } = getBlocksCached(getMemoryPaths(projectDir) as unknown as Record<string, unknown>);
-          const pendingBlocks = blocks.filter(b => b.status === "pending");
-          const pendingTriggers = allTriggers.filter(t => t.status === "pending");
+          // 只推送 type=habit 的 pending 条目，知识（type=knowledge）直接 status=auto 无需确认
+          const pendingBlocks = blocks.filter((b: any) => b.type === "habit" && b.status === "pending");
+          const pendingTriggers = allTriggers.filter((t: any) => t.type === "habit" && t.status === "pending");
           const pendingCount = pendingBlocks.length + pendingTriggers.length;
           if (pendingCount === 0) return;
 
@@ -2217,23 +2266,24 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
 
           const levelName = (mp: string) => ({ "0": "全局", "1": "个人项目级", "2": "共享项目级" })[mp] || "未知";
           const pendingList = [
-            ...pendingBlocks.map(b =>
+            ...pendingBlocks.map((b: any) =>
               `- **${b.description || "（无描述）"}**（建议：${b.suggested_status || "suggest"}·${levelName(b.memPathIndex)}）`
             ),
-            ...pendingTriggers.map(t =>
+            ...pendingTriggers.map((t: any) =>
               `- **${t.human_description || "（无描述）"}**（建议：${t.suggested_status || "suggest"}·${levelName(t.memPathIndex)}）`
             ),
           ].join("\n");
 
           const reminder = `\n## 🟡 分形：有待确认的习惯\n\n上次操作中发现以下新模式，有空时确认：\n\n${pendingList}\n\n确认方式：说"确认习惯"即可逐条确认\n`;
 
+          // noReply: true → 消息独立显示，不触发 AI 自动回复
           client.session.promptAsync({
             path: { id: sessionID },
             body: { noReply: true, parts: [{ type: "text", text: reminder }] },
           }).then(() => {
-            debug("HABIT: 温和提醒注入成功");
+            debug(`HABIT: promptAsync 注入成功（${pendingCount} 条）`);
           }).catch((err: unknown) => {
-            debug(`HABIT: 提醒注入失败 — ${String(err)}`);
+            debug(`HABIT: promptAsync 注入失败 — ${String(err)}`);
           });
         } catch (err) { debug(`HABIT: injectPendingHabitReminder 异常 — ${String(err)}`); }
       }

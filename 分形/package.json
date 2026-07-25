@@ -10,6 +10,15 @@
     "lib/",
     "prompts/"
   ],
-  "keywords": ["opencode", "plugin", "memory", "guardian", "fractal"],
-  "license": "MIT"
+  "keywords": [
+    "opencode",
+    "plugin",
+    "memory",
+    "guardian",
+    "fractal"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^26.1.1"
+  }
 }

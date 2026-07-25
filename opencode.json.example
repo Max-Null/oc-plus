@@ -7,11 +7,13 @@
   "default_agent": "双星",
 
   // ── 插件 ──
+  // OC 桌面端 1.18.x 不支持 plugins/ 目录自动发现（会报 UnsupportedContentType）。
+  // 本地插件必须使用 file:/// 绝对路径显式列出，npm 包用短名称。
   "plugin": [
     "~/.config/opencode/node_modules/superpowers",
     "opencode-acp@latest",
-    // fractal 由 OC 自动发现 ~/.config/opencode/plugins/fractal.ts，无需在此列出
-    "agents-priority"
+    "file:///C:/Users/你的用户名/.config/opencode/plugins/fractal-guardian.ts",
+    "file:///C:/Users/你的用户名/.config/opencode/plugins/agents-priority.ts"
   ],
 
   // ── 禁用 OC 内置压缩（由 opencode-acp 接管）──
@@ -42,10 +44,13 @@
   },
 
   // ── MCP 服务器 ──
+  // 注意：remote 类型 MCP 必须同时指定 type 和 enabled，否则 OC 解析报错
   "mcp": {
     // GitHub MCP：代码仓库操作（PR/Issue/搜索），需要 GitHub PAT
     // 获取 PAT：https://github.com/settings/tokens → 勾选 repo + read:org
     "github": {
+      "type": "remote",
+      "enabled": true,
       "url": "https://api.githubcopilot.com/mcp/",
       "env": {
         "GITHUB_TOKEN": "ghp_your-github-pat"
@@ -55,23 +60,30 @@
     // websearch MCP：Exa AI 搜索（免费匿名可用，有速率限制）
     // 提升额度：https://dashboard.exa.ai/api-keys 获取 Key → 加入 env
     "websearch": {
+      "type": "remote",
+      "enabled": true,
       "url": "https://mcp.exa.ai/mcp?tools=web_search_exa"
     },
 
     // gh_grep MCP：GitHub 代码全文搜索（无需认证）
     "gh_grep": {
+      "type": "remote",
+      "enabled": true,
       "url": "https://mcp.grep.app"
     },
 
     // context7 MCP：实时库文档查询（免费 1,000 次/月，无需 Key）
     // 提升额度：https://context7.com → 注册 → Dashboard 生成 Key → CONTEXT7_API_KEY
     "context7": {
+      "type": "remote",
+      "enabled": true,
       "url": "https://mcp.context7.com/mcp"
     }
   },
 
   // ── 工具权限（全局兜底）──
-  "permissions": {
+  // 注意：key 名是 permission（单数），不是 permissions
+  "permission": {
     "github": "allow",
     "websearch": "allow",
     "webfetch": "allow",

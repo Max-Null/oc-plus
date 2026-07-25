@@ -8,7 +8,8 @@
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "declaration": true
+    "declaration": true,
+    "types": ["node"]
   },
   "include": ["fractal.ts", "pipeline.ts", "pipeline.test.ts", "lib/prompts.ts"]
 }

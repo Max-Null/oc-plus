@@ -1,4 +1,4 @@
-<!-- type: knowledge --><!-- status: pending -->
+<!-- type: knowledge --><!-- status: suggest -->
 <!-- description: OC-plus pipeline V2/V3 方向，V1 完成后展开 -->
 
 ## OC-plus Pipeline V2/V3 方向

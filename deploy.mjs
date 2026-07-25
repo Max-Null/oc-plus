@@ -10,6 +10,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
 
@@ -26,6 +27,7 @@ const SRC = {
   fractalAgent: path.join(__dirname, "分形", "agents"),
   commands: path.join(__dirname, "双星系统", "commands"),
   fractalTs: path.join(__dirname, "分形", "fractal.ts"),
+  pipelineTs: path.join(__dirname, "分形", "pipeline.ts"),
   promptsLib: path.join(__dirname, "分形", "lib", "prompts.ts"),
   scripts: path.join(__dirname, "分形", "scripts"),
   promptTemplates: path.join(__dirname, "分形", "prompts"),
@@ -71,8 +73,41 @@ function ensureDir(dir) {
   }
 }
 
-function copyFile(src, destDir, label) {
-  const dest = path.join(destDir, path.basename(src));
+/**
+ * 从实际 OC 环境的 opencode.json 读取 provider 配置
+ * 返回 { providerId, modelName } 或 null（配置不存在时）
+ */
+function readOcProviderConfig() {
+  const ocConfigPath = path.join(OC, "opencode.json");
+  if (!fs.existsSync(ocConfigPath)) return null;
+  try {
+    const config = JSON.parse(fs.readFileSync(ocConfigPath, "utf-8"));
+    const modelRef = config.model; // e.g. "ds/deepseek-v4-pro" or "ds:deepseek-v4-pro"
+    if (!modelRef) return null;
+    // 支持冒号和斜杠两种分隔符，统一输出为斜杠格式（OC 标准）
+    const sep = modelRef.includes("/") ? "/" : modelRef.includes(":") ? ":" : null;
+    if (!sep) return null;
+    const idx = modelRef.indexOf(sep);
+    const providerId = modelRef.slice(0, idx);
+    const modelName = modelRef.slice(idx + 1);
+    return { providerId, modelName };
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * 替换 agent 文件中的 model: 行，使用实际 OC 环境的 provider 配置
+ * 格式: model: "providerId:modelName"
+ * 注意：OC 已知 bug 要求 agent markdown 中 model 值必须加双引号，否则解析会加尾部 /
+ */
+function patchAgentModel(content, providerId, modelName) {
+  const modelLine = `model: "${providerId}/${modelName}"`;
+  return content.replace(/^model:\s*.+$/m, modelLine);
+}
+
+function copyFile(src, destDir, label, destName) {
+  const dest = path.join(destDir, destName || path.basename(src));
   if (!fs.existsSync(src)) {
     stats.skipped.push(label || src);
     log("x", `源文件不存在: ${src}`);
@@ -295,6 +330,13 @@ function main() {
 
   // [2/7] deploy agents
   console.log("[2/7] deploying agents...");
+  // 从实际 OC 环境读取 provider 配置，部署时自动替换 agent 文件中的 model 引用
+  const ocProvider = readOcProviderConfig();
+  if (ocProvider) {
+    log(".", `provider 配置: ${ocProvider.providerId}:${ocProvider.modelName}`);
+  } else {
+    log("!", "未读取到 OC provider 配置，agent model 将使用源文件默认值");
+  }
   const agentFiles = [
     { src: path.join(SRC.agents, "双星.md"), label: "double-star agent" },
     { src: path.join(SRC.agents, "工匠.md"), label: "artisan agent" },
@@ -303,15 +345,42 @@ function main() {
     { src: path.join(SRC.fractalAgent, "助理.md"), label: "assistant agent" },
   ];
   for (const a of agentFiles) {
-    copyFile(a.src, DST.agents, a.label);
+    // 读取源文件内容，替换 model 引用为实际 OC 环境的 provider 配置
+    if (ocProvider && fs.existsSync(a.src)) {
+      try {
+        ensureDir(DST.agents);
+        let content = fs.readFileSync(a.src, "utf-8");
+        content = patchAgentModel(content, ocProvider.providerId, ocProvider.modelName);
+        const dest = path.join(DST.agents, path.basename(a.src));
+        fs.writeFileSync(dest, content, "utf-8");
+        stats.deployed.push(a.label);
+        log("V", a.label);
+      } catch (e) {
+        log("x", `${a.label} — ${e.message}`);
+        stats.failed.push(a.label);
+      }
+    } else {
+      copyFile(a.src, DST.agents, a.label);
+    }
   }
   console.log("");
 
   // [3/7] deploy plugins
   console.log("[3/7] deploying plugins...");
-  copyFile(SRC.fractalTs, DST.plugins, "fractal.ts (Guardian Agent)");
+  // 清理旧文件名（OC 缓存导致旧文件不被重新发现）
+  cleanupStale(path.join(DST.plugins, "fractal.ts"), "fractal.ts (已迁移到 fractal-guardian.ts)");
+  copyFile(SRC.fractalTs, DST.plugins, "fractal-guardian.ts (Guardian Agent)", "fractal-guardian.ts");
+  copyFile(SRC.pipelineTs, DST.pluginsLib, "pipeline.ts (流水线引擎)");
   copyFile(SRC.promptsLib, DST.pluginsLib, "lib/prompts.ts");
   copyFile(SRC.agentsPriority, DST.plugins, "agents-priority.ts");
+  // 修正 fractal-guardian.ts 中的 import 路径：pipeline.ts 部署在 lib/ 下
+  {
+    const fractalDest = path.join(DST.plugins, "fractal-guardian.ts");
+    let content = fs.readFileSync(fractalDest, "utf-8");
+    content = content.replace('"./pipeline.js"', '"./lib/pipeline.ts"');
+    content = content.replace('"./lib/prompts.js"', '"./lib/prompts.ts"');
+    fs.writeFileSync(fractalDest, content, "utf-8");
+  }
   console.log("");
 
   // [4/7] deploy commands
@@ -370,17 +439,82 @@ function main() {
     stats.failed.forEach(f => console.log(`     FAIL: ${f}`));
   }
 
+  // [9/9] post-deploy verification
+  console.log("\n[9/9] post-deploy verification...");
+  const verifications = [];
+
+  // 验证 1：fractal-guardian.ts MD5 与源码一致
+  const srcFractal = fs.readFileSync(SRC.fractalTs, "utf-8")
+    // 源码中的 import 是 "./pipeline.js"，部署后替换为 "./lib/pipeline.ts"，
+    // 因此对比时需对源码做同样替换以保持可比性
+    .replace('"./pipeline.js"', '"./lib/pipeline.ts"')
+    .replace('"./lib/prompts.js"', '"./lib/prompts.ts"');
+  const dstFractal = fs.readFileSync(path.join(DST.plugins, "fractal-guardian.ts"), "utf-8");
+  const srcHash = crypto.createHash("md5").update(srcFractal).digest("hex");
+  const dstHash = crypto.createHash("md5").update(dstFractal).digest("hex");
+  const md5Ok = srcHash === dstHash;
+  verifications.push({ label: "fractal-guardian.ts MD5", pass: md5Ok });
+  if (md5Ok) log("V", "fractal-guardian.ts MD5 一致");
+  else log("x", `fractal-guardian.ts MD5 不一致 (源码: ${srcHash.slice(0,8)}, 部署: ${dstHash.slice(0,8)})`);
+
+  // 验证 2：import 依赖文件存在
+  const importCheck = (() => {
+    const content = dstFractal;
+    const matches = content.matchAll(/from\s+"(\.\/[^"]+)"/g);
+    let allExist = true;
+    for (const m of matches) {
+      const importPath = path.join(path.dirname(path.join(DST.plugins, "fractal-guardian.ts")), m[1]);
+      if (!fs.existsSync(importPath)) {
+        log("x", `import 依赖缺失: ${m[1]} (${importPath})`);
+        allExist = false;
+      }
+    }
+    return allExist;
+  })();
+  verifications.push({ label: "import 依赖完整", pass: importCheck });
+  if (importCheck) log("V", "import 依赖完整");
+  else log("x", "import 依赖缺失——分形将无法加载");
+
+  // 验证 3：plugins 目录结构
+  const dirCheck = (() => {
+    const required = [
+      { file: "fractal-guardian.ts", label: "fractal-guardian.ts" },
+      { file: "agents-priority.ts", label: "agents-priority.ts" },
+      { file: "lib/pipeline.ts", label: "lib/pipeline.ts" },
+      { file: "lib/prompts.ts", label: "lib/prompts.ts" },
+    ];
+    let allGood = true;
+    for (const r of required) {
+      const exists = fs.existsSync(path.join(DST.plugins, r.file));
+      if (!exists) { log("x", `${r.label} 缺失`); allGood = false; }
+      else log("V", r.label);
+    }
+    // 确认旧文件已清理
+    if (fs.existsSync(path.join(DST.plugins, "fractal.ts"))) {
+      log("!", "fractal.ts 仍存在（应已清理——可能导致 OC 缓存旧版本）");
+      allGood = false;
+    }
+    return allGood;
+  })();
+  verifications.push({ label: "plugins 目录结构", pass: dirCheck });
+
+  const allVerified = verifications.every(v => v.pass);
+  console.log(allVerified ? "  ✓ 全部验证通过" : "  ✗ 验证未通过——请修复后重新部署");
+
   // post-deploy: opencode.json checklist
   console.log("\n===== opencode.json checklist =====");
   console.log("deploy 已将文件复制到位，但需手动配置以下内容。");
   console.log("完整模板见项目根目录 opencode.json.example，可直接复制后修改关键字段。");
   console.log("");
-  console.log("1. provider 模型 API Key:");
+  console.log("1. provider 模型配置（agent model 会自动从这里读取）:");
   console.log("   编辑 provider.ds.options.apiKey，替换为你的 DeepSeek Key");
   console.log("   获取: https://platform.deepseek.com/api_keys");
+  console.log("   修改 model 字段（如 ds:deepseek-v4-pro）后，下次部署 agent 会自动同步");
   console.log("");
-  console.log("2. plugin 数组:");
-  console.log('   ["~/.config/opencode/node_modules/superpowers", "opencode-acp@latest", "fractal", "agents-priority"]');
+  console.log("2. plugin 数组（桌面端 1.18.x 不支持自动发现，必须 file:/// 显式列出）:");
+  console.log('   ["superpowers", "opencode-acp@latest",');
+  console.log('    "file:///C:/Users/.../plugins/fractal-guardian.ts",');
+  console.log('    "file:///C:/Users/.../plugins/agents-priority.ts"]');
   console.log("");
   console.log("3. 安装 opencode-acp（自适应上下文压缩）:");
   console.log("   opencode plugin opencode-acp@latest --global");
@@ -391,20 +525,22 @@ function main() {
   console.log("");
   console.log("5. MCP 服务器（联网搜索 / 代码搜索 / 文档查询）:");
   console.log("   复制 opencode.json.example 中的 mcp 段到你的 opencode.json");
+  console.log("   ⚠️ remote 类型 MCP 必须同时指定 type 和 enabled，否则 OC 解析报错 ConfigInvalidError");
   console.log("   包含 4 个 MCP:");
-  console.log("   · websearch  — Exa AI 搜索（免费匿名可用，不限额度但有限速）");
   console.log("   · github     — GitHub 操作（需要 PAT: https://github.com/settings/tokens）");
+  console.log("   · websearch  — Exa AI 搜索（免费匿名可用，不限额度但有限速）");
   console.log("   · gh_grep    — GitHub 代码全文搜索（无需认证）");
   console.log("   · context7   — 实时库文档（免费 1,000 次/月，无需 Key）");
   console.log("");
   console.log("6. 权限配置:");
-  console.log("   复制 opencode.json.example 中的 permissions 段");
+  console.log("   ⚠️ key 名是 permission（单数），不是 permissions（复数）");
+  console.log("   复制 opencode.json.example 中的 permission 段");
   console.log("");
   console.log("7. 环境变量检查:");
   console.log("   OPENCODE_EXPERIMENTAL_LSP_TOOL=true");
   console.log("   OPENCODE_DISABLE_CLAUDE_CODE_PROMPT=1");
   console.log("");
-  console.log("完成后重启 OpenCode。验证: memories/debug.log 应出现 [fractal] 日志行。");
+  console.log("完成后重启 OpenCode。验证: memories/.fractal-healthcheck 应出现（分形自检标记）。");
 
   return stats.failed.length > 0 ? 1 : 0;
 }
