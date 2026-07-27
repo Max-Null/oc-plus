@@ -16,7 +16,7 @@ import os from "node:os";
 const HOME = os.homedir();
 const MEMORIES_DIR = path.join(HOME, ".config", "opencode", "memories");
 const DEDUP_STATE_FILE = path.join(MEMORIES_DIR, ".dedup-last-check.json");
-const DEDUP_CHECK_INTERVAL = 30; // 每 N 轮检查一次
+const DEDUP_CHECK_INTERVAL = 15; // 缩短间隔，配合事件驱动触发
 
 // ============================================================
 // 类型

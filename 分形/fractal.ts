@@ -1694,19 +1694,6 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
         }
       } catch { /* 静默 */ }
 
-      // ---- 去重审查（每隔 N 轮检查 blocks/triggers 重复） ----
-      try {
-        const apiCfg = await getApiConfig();
-        const dupResults = await dedup.runDedupCheck(
-          turnCounter, false, apiCfg, (msg: string) => debug(msg), projectDir
-        );
-        if (dupResults.length > 0) {
-          const reminder = dedup.buildDedupReminder(dupResults);
-          output.system.push(`\n${reminder}\n`);
-          debug(`DEDUP: 注入 ${dupResults.length} 对疑似重复提醒`);
-        }
-      } catch { /* 静默 */ }
-
       const newEvents = getNewEvents();
       // 动态阈值：首次 20 条，第 N 次 20 * 2^N 条（上限 400）
       const dynamicThreshold = Math.min(ANALYSIS_THRESHOLD * Math.pow(2, analysisCount), 400);
@@ -1730,6 +1717,21 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
 
       // ---- 步骤 2：注入 blocks + triggers ----
       const { blocks, triggers } = mergeBlocksAndTriggers(memoryPaths);
+
+      // ---- 去重审查（分析后立即检查 + 定期扫描） ----
+      try {
+        // forceCheck = 有新的 pending items 被创建了（分析刚刚运行过）
+        const hasNewPending = blocks.some(b => b.status === "pending");
+        const apiCfg = await getApiConfig();
+        const dupResults = await dedup.runDedupCheck(
+          turnCounter, /*forceCheck*/ hasNewPending, apiCfg, (msg: string) => debug(msg), projectDir
+        );
+        if (dupResults.length > 0) {
+          const reminder = dedup.buildDedupReminder(dupResults);
+          output.system.push(`\n${reminder}\n`);
+          debug(`DEDUP: 注入 ${dupResults.length} 对疑似重复提醒`);
+        }
+      } catch { /* 静默 */ }
 
       // 按 type + status 分类
       const autoHabits = triggers.filter(t => t.type === "habit" && t.status === "auto");
