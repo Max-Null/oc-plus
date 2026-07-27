@@ -448,9 +448,9 @@ function main() {
 
   // 验证 1：fractal-guardian.ts MD5 与源码一致
   const srcFractal = fs.readFileSync(SRC.fractalTs, "utf-8")
-    // 源码中的 import 是 "./pipeline.js"，部署后替换为 "./lib/pipeline.ts"，
-    // 因此对比时需对源码做同样替换以保持可比性
+    // 源码中的 import 路径与部署后不同——对比时对源码做同样替换
     .replace('"./pipeline.js"', '"./lib/pipeline.ts"')
+    .replace('"./dedup-checker.js"', '"./lib/dedup-checker.ts"')
     .replace('"./lib/prompts.js"', '"./lib/prompts.ts"');
   const dstFractal = fs.readFileSync(path.join(DST.plugins, "fractal-guardian.ts"), "utf-8");
   const srcHash = crypto.createHash("md5").update(srcFractal).digest("hex");
