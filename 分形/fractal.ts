@@ -1547,6 +1547,22 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
   let gateJustReleased = false;
   let implementIdleTurns = 0;
 
+  // keep-warm 状态（V3.8 缓存优化）：知识项被匹配后保持热度
+  const KEEP_WARM_FILE = path.join(MEMORIES_DIR, ".keepwarm-state.json");
+  const KEEP_WARM_ROUNDS = 5;
+
+  function readKeepWarmState(): Record<string, number> {
+    try { if (fs.existsSync(KEEP_WARM_FILE)) return JSON.parse(fs.readFileSync(KEEP_WARM_FILE, "utf-8")); } catch { /* */ }
+    return {};
+  }
+  function writeKeepWarmState(s: Record<string, number>): void {
+    const pruned: Record<string, number> = {};
+    for (const [k, v] of Object.entries(s)) {
+      if (turnCounter - v <= KEEP_WARM_ROUNDS * 2) pruned[k] = v;
+    }
+    try { fs.writeFileSync(KEEP_WARM_FILE, JSON.stringify(pruned, null, 0), "utf-8"); } catch { /* */ }
+  }
+
   return {
     /**
      * 会话启动时：
@@ -1570,7 +1586,48 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
         `## 分形 v2.1\n**元知识记录**（手动 + 自主两路）\n…`);
       output.system.push(`\n${coreRules}\n`);
 
-      // ---- 触发线 6：行为前门（V3.7）——grill 对齐指令 ----
+      // ---- 状态栏（固定位置，始终存在，稳定缓存） ----
+      // 行为前门 + 流水线 + 断言提醒合并为一个固定 section
+      {
+        const statusLines: string[] = [];
+        // 行为前门状态
+        if (alignmentGate.active) {
+          statusLines.push(`- ⚠️ **行为前门**: 激活中（v${alignmentGate.version}）— 先对齐再动手`);
+        } else {
+          statusLines.push("- ⚠️ 行为前门: 待命");
+        }
+        // 流水线状态
+        if (pipelineState && pipelineState.status === "active" && !alignmentGate.active) {
+          statusLines.push(`- 🔄 **流水线**: ${pipelineState.context.feature} | ${pipelineState.currentStage} | ${pipelineState.complexity}`);
+        } else {
+          statusLines.push("- 🔄 流水线: 待命");
+        }
+        // 断言提醒状态
+        const assertionCount = readCounter().count || 0;
+        if (assertionCount > 0) {
+          statusLines.push(`- 🔍 **查证提醒**: L${Math.min(assertionCount, 4)}（连续 ${assertionCount} 次断言未查证）`);
+        } else {
+          statusLines.push("- 🔍 查证提醒: 无");
+        }
+        output.system.push(`\n## 状态栏\n${statusLines.join("\n")}\n`);
+      }
+
+      // 无反馈环检测（合并到状态栏，不新增独立 section）
+      {
+        const nfs = readNoFeedbackState();
+        if (nfs.consecutiveTurns >= NO_FEEDBACK_THRESHOLD) {
+          output.system.push(`\n## ⚠️ 分形：缺少反馈环\n连续 ${nfs.consecutiveTurns} 轮修改代码但未执行测试。按照结构化调试流程，先建立反馈环再修复（Phase 1）。\n`);
+          debug(`触发线2扩展: system.transform 注入无反馈环警告，consecutiveTurns=${nfs.consecutiveTurns}`);
+          nfs.consecutiveTurns = 0;
+          saveNoFeedbackState(nfs);
+        } else if (nfs.consecutiveTurns > 0) {
+          // nudge < threshold but only in nudge turns
+          if (isNudgeTurn) {
+            output.system.push(`\n> 💡 已连续 ${nfs.consecutiveTurns} 轮修改代码但未执行测试。${nfs.consecutiveTurns >= 2 ? "考虑建立反馈环。" : ""}\n`);
+          }
+          // Don't reset on just nudge
+        }
+      }
       if (alignmentGate.active) {
         const gatePrompt = `\n## ⚠️ 行为前门 v${alignmentGate.version}：先对齐，再动手\n\n在看到用户明确确认（如"开始实现""没问题做吧""go ahead"或"跳过对齐""直接做"）之前，禁止修改任何代码。你必须：\n\n1. **一次只问一个问题**，给出推荐答案后等待用户回复\n2. **能查到的事实自己去查**——从代码/文档/环境发现的信息不问用户\n3. **决策归属用户**——逐条确认，不跳过\n4. 按以下维度逐个质询（不限于此）：\n   a) 用户需要什么？（输入/输出/可观察行为）\n   b) 数据模型：什么持久化？什么瞬态？真相源在哪？\n   c) 边界情况和失败模式\n   d) 哪些文件/模块受影响？\n5. 所有维度覆盖完毕，用户确认后，输出「设计对齐，开始实现」——此时方可开始编码\n\n> 习惯确认、联网查证等分形规则在行为前门激活时仍需遵守。\n`;
         output.system.push(gatePrompt);
@@ -1585,13 +1642,11 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
           debug(`流水线: 跨会话恢复 — ${pipelineState.pipelineId} (${pipelineState.currentStage})`);
         }
       }
+      // 流水线阶段 prompt（仅在 active 且门释放后注入，放尾部减少前缀缓存污染）
       if (pipelineState && pipelineState.status === "active" && !alignmentGate.active) {
-        const f = pipelineState.context.feature;
-        const s = pipelineState.currentStage;
-        const c = pipelineState.complexity;
-        output.system.push(`\n> 🔄 流水线: ${f} | ${s} | ${c}`);
         const sp = pipeline.getStageStartPrompt(pipelineState);
         if (sp) output.system.push(`\n${sp}\n`);
+        const s = pipelineState.currentStage;
         if (s !== "idle" && pipelineState.stages[s]?.status === "active") {
           const done = Object.entries(pipelineState.stages).filter(([, v]) => v.status === "completed").map(([n]) => n).join(" → ");
           if (done) output.system.push(`\n已完成：${done}。继续当前阶段「${s}」。`);
@@ -1729,9 +1784,18 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
       }
       // 加权融合（归一化 relevance 后计算）
       // 权重来源：A-MAC(2603.04549) 结论——category 先验 + 命中率 + 时效性，priority 权重 0.5 是类别内最高单因子
+      // V3.8 新增 keep-warm 加分：最近 5 轮内被注入过的知识即使本轮无关键词命中也保留
       for (const s of scored) {
         const normRel = maxRelevance > 0 ? s.relevance / maxRelevance : 0;
         s.score = normRel * 0.4 + (s.priority / 100) * 0.5 + Math.exp(-Math.max(0, (now - s.mtime) / (1000 * 60 * 60 * 24)) / 30) * 0.1;
+        // keep-warm 加分：5 轮内被注入过的知识获得额外权重（0.45，衰减到 0）
+        const kwState = readKeepWarmState();
+        const label = (s.item as any).label || (s.item as any).fileName;
+        const lastHit = kwState[label] || 0;
+        if (lastHit > 0 && turnCounter - lastHit <= 5) {
+          const keepWarmBonus = ((6 - (turnCounter - lastHit)) / 5) * 0.45;
+          s.score += keepWarmBonus;
+        }
       }
       scored.sort((a, b) => b.score - a.score);
 
@@ -1840,6 +1904,16 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
         }
       }
 
+      // ---- keep-warm 更新（V3.8）：注入的知识项保持热度 ----
+      {
+        const kw = readKeepWarmState();
+        for (const s of topKnowledge) {
+          const label = (s.item as any).label || (s.item as any).fileName;
+          kw[label] = turnCounter; // 记录本轮被注入，刷新倒计时
+        }
+        writeKeepWarmState(kw);
+      }
+
       // 注入 auto habits（已确认的习惯，仅 nudge turn 注入）
       // 改为指令语气：这不是观察结论，是 LLM 必须照做的默认行为
       if (isNudgeTurn && autoHabits.length > 0) {
@@ -1881,33 +1955,15 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
 
       // 回应模式已升级为 event hook 触发（V2.0），不再硬编码写入后调助理规则
 
-      // 触发线 2 扩展：无反馈环检测 → 通过 system.transform 注入提醒（下一轮生效）
-      if (!isLinePaused("2")) {
-        const nfs = readNoFeedbackState();
-        if (nfs.consecutiveTurns >= NO_FEEDBACK_THRESHOLD) {
-          const warning = `\n## ⚠️ 分形：缺少反馈环\n连续 ${nfs.consecutiveTurns} 轮修改代码但未执行测试。按照结构化调试流程，先建立反馈环再修复（Phase 1）。在下一轮修改代码前，先跑一次相关测试建立"能变红"的反馈环。\n`;
-          output.system.push(warning);
-          debug(`触发线2扩展: system.transform 注入无反馈环警告，consecutiveTurns=${nfs.consecutiveTurns}`);
-          // 注入后重置计数，避免连续警告
-          nfs.consecutiveTurns = 0;
-          saveNoFeedbackState(nfs);
-        }
-      }
-
       // 中文思考：独立 system message，最高 recency，不受 core-rules 大块稀释
       output.system.push("\n以中文思考，除非用户要求，否则回答也使用中文。\n");
 
-      // === 计划文档锚点注入（每轮都注入，与知识注入不同——这是导航信息） ===
+      // === 计划文档锚点注入（固定位置，始终存在，稳定缓存） ===
       const plans = getActivePlanSummaries();
-      if (plans.length > 0) {
-        const planSection = [
-          "\n## 📋 当前计划",
-          ...plans,
-          plans.length > 1 ? "\n> 多个计划并行时，优先完成当前正在执行的那个。" : ""
-        ].join("\n");
-        output.system.push(planSection);
-        debug(`注入 ${plans.length} 个计划摘要`);
-      }
+      const planSection = plans.length > 0
+        ? ["\n## 📋 当前计划", ...plans, plans.length > 1 ? "\n> 多个计划并行时，优先完成当前正在执行的那个。" : ""].join("\n")
+        : "\n## 📋 当前计划\n暂无活跃计划";
+      output.system.push(planSection);
 
       // ---- pendingWarnings 注入（V3.8）：从 chat.message 迁移 ----
       // 原 chat.message 用 output.parts.unshift() 注入，但 OC 的 Session.updatePart
