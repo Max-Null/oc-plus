@@ -1643,7 +1643,7 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
       try {
         const apiCfg = await getApiConfig();
         const dupResults = await dedup.runDedupCheck(
-          turnCounter, false, apiCfg, (msg: string) => debug(msg)
+          turnCounter, false, apiCfg, (msg: string) => debug(msg), projectDir
         );
         if (dupResults.length > 0) {
           const reminder = dedup.buildDedupReminder(dupResults);

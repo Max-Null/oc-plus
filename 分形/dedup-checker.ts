@@ -110,19 +110,31 @@ interface MemoryItem {
 }
 
 /**
- * 读取所有记忆项（blocks + triggers，包含 auto/suggest/pending 状态）
+ * 读取所有记忆项（全局 + 项目级）
+ * @param projectDir 项目根目录（可选，用于加载 project 级别 memories）
  */
-function loadAllMemories(): MemoryItem[] {
+function loadAllMemories(projectDir?: string): MemoryItem[] {
   const items: MemoryItem[] = [];
   const statusDirs = ["pending", "auto", "suggest"];
-  const rootDirs = [
-    path.join(MEMORIES_DIR, "blocks"),
-    path.join(MEMORIES_DIR, "triggers"),
-  ];
 
   // 全局 memories
-  for (const rootDir of rootDirs) {
-    const type = rootDir.includes("triggers") ? "trigger" : "block" as const;
+  const globalRoots = [
+    [path.join(MEMORIES_DIR, "blocks"), path.join(MEMORIES_DIR, "triggers")],
+  ];
+  // 项目级 memories（如果 projectDir 存在）
+  if (projectDir) {
+    const projectMemories = path.join(projectDir, ".opencode", "memories");
+    if (fs.existsSync(projectMemories)) {
+      const projectBlocks = path.join(projectMemories, "blocks");
+      const projectTriggers = path.join(projectMemories, "triggers");
+      if (fs.existsSync(projectBlocks) || fs.existsSync(projectTriggers)) {
+        globalRoots.push([projectBlocks, projectTriggers]);
+      }
+    }
+  }
+
+  for (const [blocksDir, triggersDir] of globalRoots) {
+    for (const [rootDir, type] of [[blocksDir, "block"] as const, [triggersDir, "trigger"] as const] as const) {
     // 子目录
     for (const sd of statusDirs) {
       const dir = path.join(rootDir, sd);
@@ -147,6 +159,7 @@ function loadAllMemories(): MemoryItem[] {
         }
       } catch { /* */ }
     }
+  }
   }
 
   return items;
@@ -252,6 +265,7 @@ export async function runDedupCheck(
   forceCheck: boolean,
   apiConfig: { baseURL: string; apiKey: string; model: string } | null,
   debugLog: (msg: string) => void,
+  projectDir?: string,
 ): Promise<DedupResult[]> {
   const state = readDedupState();
 
@@ -261,7 +275,7 @@ export async function runDedupCheck(
   }
 
   debugLog(`DEDUP: 开始检查 (turn=${turnCounter})`);
-  const items = loadAllMemories();
+  const items = loadAllMemories(projectDir);
   if (items.length < 2) {
     debugLog(`DEDUP: 记忆项不足 (${items.length})，跳过`);
     state.lastCheckTurn = turnCounter;
@@ -292,21 +306,28 @@ export async function runDedupCheck(
     return [];
   }
 
-  // 阶段 2：LLM 精确对比（仅在 API 配置可用时）
+  // 阶段 2：LLM 精确对比（并行执行，限流 5 并发）
   const results: DedupResult[] = [];
   if (apiConfig) {
-    for (const c of candidates) {
-      const llmResult = await callLLMForDedup(c.a, c.b, apiConfig);
-      state.totalCompared++;
-
-      if (llmResult?.duplicate) {
-        results.push({
-          itemA: { fileName: c.a.fileName, label: c.a.label, memPath: c.a.memPath, content: c.a.content, type: c.a.type },
-          itemB: { fileName: c.b.fileName, label: c.b.label, memPath: c.b.memPath, content: c.b.content, type: c.b.type },
-          keywordOverlap: c.overlap,
-        });
-        state.duplicatesFound++;
-        debugLog(`DEDUP: 发现疑似重复 — ${c.a.fileName} ↔ ${c.b.fileName} (${llmResult.reason})`);
+    const MAX_CONCURRENT = 5;
+    for (let i = 0; i < candidates.length; i += MAX_CONCURRENT) {
+      const batch = candidates.slice(i, i + MAX_CONCURRENT);
+      const batchResults = await Promise.all(
+        batch.map(async (c) => {
+          const llmResult = await callLLMForDedup(c.a, c.b, apiConfig);
+          if (llmResult?.duplicate) {
+            return {
+              itemA: { fileName: c.a.fileName, label: c.a.label, memPath: c.a.memPath, content: c.a.content, type: c.a.type },
+              itemB: { fileName: c.b.fileName, label: c.b.label, memPath: c.b.memPath, content: c.b.content, type: c.b.type },
+              keywordOverlap: c.overlap,
+            } as DedupResult;
+          }
+          state.totalCompared++;
+          return null;
+        })
+      );
+      for (const r of batchResults) {
+        if (r) { results.push(r); state.duplicatesFound++; }
       }
     }
   }
