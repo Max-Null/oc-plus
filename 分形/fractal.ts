@@ -317,16 +317,35 @@ function getActivePlanSummaries(): string[] {
       // 跳过已标记为「已完成」的计划
       if (/状态[：:]\s*(已完成|完成|done)/i.test(content)) continue;
 
-      // 统计 checkbox 进度：- [x] vs - [ ]
       const lines = content.split("\n");
       let completed = 0, total = 0;
       let lastCompletedText = "";
+
+      // 方式 A：checkbox 格式 — - [x] vs - [ ]
       for (const line of lines) {
         if (/^\s*-\s+\[x\]/i.test(line)) {
           completed++; total++;
           lastCompletedText = line.replace(/^\s*-\s+\[x\]\s*/i, "").trim();
         } else if (/^\s*-\s+\[ \]/i.test(line)) { total++; }
       }
+
+      // 方式 B：表格/文本格式 —「已完成的 N 个任务」+「待后续」计数
+      if (total === 0) {
+        let inPending = false;
+        let pending = 0;
+        for (const line of lines) {
+          // 匹配「已完成的 6 个任务」
+          const doneMatch = line.match(/已完成的\s*(\d+)\s*个?任务/);
+          if (doneMatch) completed = parseInt(doneMatch[1], 10);
+
+          // 进入「待后续/待完成」section 后，统计 bullet 条目
+          if (/^#{1,4}\s*待(后续|完成|实施|实现)/.test(line)) { inPending = true; continue; }
+          if (inPending && /^#{1,4}\s/.test(line)) { inPending = false; continue; }
+          if (inPending && /^\s*[-*]\s/.test(line)) pending++;
+        }
+        total = completed + pending;
+      }
+
       const progressStr = total > 0 ? ` · ${completed}/${total} 完成` : "";
 
       // 提取标题和摘要
@@ -349,7 +368,8 @@ function getActivePlanSummaries(): string[] {
 
       // 摘要限制长度，避免撑破 prompt 行
       const shortSummary = summary.length > 60 ? summary.slice(0, 60) + "…" : summary;
-      summaries.push(`- **${title}**（${f}${progressStr}）：${shortSummary}`);
+      // 附带完整路径，避免双星只看到文件名找不到计划文件
+      summaries.push(`- **${title}**（~/.config/opencode/plans/${f}${progressStr}）：${shortSummary}`);
 
       // 构建 .active.json 记录
       activePlans.push({
