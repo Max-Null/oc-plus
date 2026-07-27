@@ -1581,15 +1581,64 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
       const isNudgeTurn = turnCounter % NUDGE_INTERVAL === 0;
       debug(`FRACTAL: turn=${turnCounter}, nudge=${isNudgeTurn} (interval=${NUDGE_INTERVAL})`);
 
-      // ---- 步骤 0：注入分形核心规则（外部模板，可编辑 ~/.config/opencode/fractal-prompts/core-rules.md） ----
+      // ============================================================
+      // V3.8 缓存优化精简版 system.transform
+      // ============================================================
+
+      // 1. 核心规则（外部模板，保持最小化）
       const coreRules = loadPrompt("core-rules.md",
         `## 分形 v2.1\n**元知识记录**（手动 + 自主两路）\n…`);
       output.system.push(`\n${coreRules}\n`);
 
+      // 2. 行为前门（精简为 1 行 blockquote）
+      if (alignmentGate.active) {
+        output.system.push(`\n> ⚠️ **行为前门 v${alignmentGate.version}**：先对齐再动手。按需求→数据→边界→影响逐维度质询，用户确认「设计对齐」后方可编码。\n`);
+        debug(`行为前门: 精简注入 (v${alignmentGate.version})`);
+      }
+
+      // 3. 流水线进度（1 行）
+      if (pipelineState?.status === "active" && !alignmentGate.active) {
+        output.system.push(`\n> 🔄 **流水线**: ${pipelineState.context.feature} | ${pipelineState.currentStage} | ${pipelineState.complexity}\n`);
+      }
+
+      // 4. 知识索引（nudge turn 注入，最多 5 条，每行 ≤60 字符）
+      if (isNudgeTurn) {
+        const memPaths = getMemoryPaths(projectDir);
+        const { blocks: kb } = mergeBlocksAndTriggers(memPaths);
+        const knowledge = kb.filter((b: any) => b.type === "knowledge" && b.status !== "pending");
+        const maxShow = 5;
+        if (knowledge.length > 0) {
+          const lines = [];
+          for (const k of knowledge.slice(0, maxShow)) {
+            const label = (k as any).label || (k as any).fileName || "?";
+            const desc = ((k as any).description || "").slice(0, 55);
+            lines.push(`- **${label}**${desc ? " → " + desc : ""}`);
+          }
+          const suffix = knowledge.length > maxShow ? `\n> *共 ${knowledge.length} 条，展示 ${maxShow}*` : "";
+          output.system.push(`\n### 核心知识\n${lines.join("\n")}${suffix}\n`);
+        }
+      }
+
+      // 5. 计划摘要（有则注入）
+      const activePlans = getActivePlanSummaries();
+      if (activePlans.length > 0) {
+        output.system.push(`\n### 当前计划\n${activePlans.join("\n")}\n`);
+      }
+
+      // 6. checkbox 规则 + 中文
+      output.system.push(`\n${loadPrompt("websearch-rules.md", "")}\n`);
+      output.system.push("\n以中文思考，除非用户要求，否则回答也使用中文。\n");
+
+      return; // ← V3.8 精简版，跳过原有复杂注入逻辑
+
+      // V3.8 缓存优化：稳定内容用 stableBuf 先推，可变内容用 varBuf 后推
+      // OC 截断 15K 预算时，stableBuf 内容在截断线前 → 前缀稳定 → 缓存命中
+      const varBuf: string[] = [];
+
       // ---- 触发线 6：行为前门（V3.7）grill 对齐指令 ----
       if (alignmentGate.active) {
         const gatePrompt = `\n> ## ⚠️ 行为前门 v${alignmentGate.version}：先对齐，再动手\n>\n> 在看到用户明确确认（如"开始实现""没问题做吧""go ahead"或"跳过对齐""直接做"）之前，禁止修改任何代码。你必须：\n>\n> 1. **一次只问一个问题**，给出推荐答案后等待用户回复\n> 2. **能查到的事实自己去查**——从代码/文档/环境发现的信息不问用户\n> 3. **决策归属用户**——逐条确认，不跳过\n> 4. 按以下维度逐个质询（不限于此）：\n>    a) 用户需要什么？（输入/输出/可观察行为）\n>    b) 数据模型：什么持久化？什么瞬态？真相源在哪？\n>    c) 边界情况和失败模式\n>    d) 哪些文件/模块受影响？\n> 5. 所有维度覆盖完毕，用户确认后，输出「设计对齐，开始实现」——此时方可开始编码\n>\n> > 习惯确认、联网查证等分形规则在行为前门激活时仍需遵守。\n`;
-        output.system.push(gatePrompt);
+        varBuf.push(gatePrompt);
         debug(`行为前门: system.transform 注入 grill 指令 (v${alignmentGate.version})`);
       }
 
@@ -1605,12 +1654,12 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
         const f = pipelineState.context.feature;
         const s = pipelineState.currentStage;
         const c = pipelineState.complexity;
-        output.system.push(`\n> 🔄 流水线: ${f} | ${s} | ${c}`);
+        varBuf.push(`\n> 🔄 流水线: ${f} | ${s} | ${c}`);
         const sp = pipeline.getStageStartPrompt(pipelineState);
-        if (sp) output.system.push(`\n${sp}\n`);
+        if (sp) varBuf.push(`\n${sp}\n`);
         if (s !== "idle" && pipelineState.stages[s]?.status === "active") {
           const done = Object.entries(pipelineState.stages).filter(([, v]) => v.status === "completed").map(([n]) => n).join(" → ");
-          if (done) output.system.push(`\n已完成：${done}。继续当前阶段「${s}」。`);
+          if (done) varBuf.push(`\n已完成：${done}。继续当前阶段「${s}」。`);
         }
       }
 
