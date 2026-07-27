@@ -26,6 +26,7 @@ import crypto from "node:crypto";
 import { getSystemPrompt, getUserPrompt } from "./lib/prompts.js";
 
 import * as pipeline from "./pipeline.js";
+import * as dedup from "./dedup-checker.js";
 // ============================================================
 // 诊断模式：在 ~/.config/opencode/memories/.fractal-debug 创建空文件即可启用
 // 日志输出到 ~/.config/opencode/memories/fractal-startup.log + console
@@ -1635,6 +1636,19 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
       try {
         if (!isLinePaused("5")) {
           await checkAndExtractCommitKnowledge(projectDir, memoryPaths);
+        }
+      } catch { /* 静默 */ }
+
+      // ---- 去重审查（每隔 N 轮检查 blocks/triggers 重复） ----
+      try {
+        const apiCfg = await getApiConfig();
+        const dupResults = await dedup.runDedupCheck(
+          turnCounter, false, apiCfg, (msg: string) => debug(msg)
+        );
+        if (dupResults.length > 0) {
+          const reminder = dedup.buildDedupReminder(dupResults);
+          output.system.push(`\n${reminder}\n`);
+          debug(`DEDUP: 注入 ${dupResults.length} 对疑似重复提醒`);
         }
       } catch { /* 静默 */ }
 

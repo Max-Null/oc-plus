@@ -28,6 +28,7 @@ const SRC = {
   commands: path.join(__dirname, "双星系统", "commands"),
   fractalTs: path.join(__dirname, "分形", "fractal.ts"),
   pipelineTs: path.join(__dirname, "分形", "pipeline.ts"),
+  dedupTs: path.join(__dirname, "分形", "dedup-checker.ts"),
   promptsLib: path.join(__dirname, "分形", "lib", "prompts.ts"),
   scripts: path.join(__dirname, "分形", "scripts"),
   promptTemplates: path.join(__dirname, "分形", "prompts"),
@@ -371,13 +372,15 @@ function main() {
   cleanupStale(path.join(DST.plugins, "fractal.ts"), "fractal.ts (已迁移到 fractal-guardian.ts)");
   copyFile(SRC.fractalTs, DST.plugins, "fractal-guardian.ts (Guardian Agent)", "fractal-guardian.ts");
   copyFile(SRC.pipelineTs, DST.pluginsLib, "pipeline.ts (流水线引擎)");
+  copyFile(SRC.dedupTs, DST.pluginsLib, "dedup-checker.ts (去重审查)");
   copyFile(SRC.promptsLib, DST.pluginsLib, "lib/prompts.ts");
   copyFile(SRC.agentsPriority, DST.plugins, "agents-priority.ts");
-  // 修正 fractal-guardian.ts 中的 import 路径：pipeline.ts 部署在 lib/ 下
+  // 修正 fractal-guardian.ts 中的 import 路径：pipeline/dedup-checker 部署在 lib/ 下
   {
     const fractalDest = path.join(DST.plugins, "fractal-guardian.ts");
     let content = fs.readFileSync(fractalDest, "utf-8");
     content = content.replace('"./pipeline.js"', '"./lib/pipeline.ts"');
+    content = content.replace('"./dedup-checker.js"', '"./lib/dedup-checker.ts"');
     content = content.replace('"./lib/prompts.js"', '"./lib/prompts.ts"');
     fs.writeFileSync(fractalDest, content, "utf-8");
   }
