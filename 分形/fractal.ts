@@ -1126,41 +1126,145 @@ function matchFileTriggers(filePath: string, projectDir?: string): {
 }
 
 /**
+ * 检查编辑的文件是否有对应的设计文档和测试文件
+ * 用于触发线 1 增强：改代码后提醒同步更新文档/测试
+ */
+function findRelatedFiles(
+  filePath: string,
+  projectDir: string,
+): { docs: string[]; tests: string[] } {
+  const relative = path.relative(projectDir, filePath);
+
+  // 从路径提取特征关键词：文件名（去扩展名） + 非通用目录名
+  const stem = path.basename(filePath, path.extname(filePath));
+  const genericDirs = new Set(["src", "lib", "dist", "node_modules",
+    "components", "utils", "services", "api", "stores", "pages", "views",
+    "assets", "public", "static", "build", "types", "hooks", "plugins"]);
+  const parts = relative.split(path.sep);
+  const keywords = new Set<string>([stem]);
+  for (const p of parts) {
+    if (!genericDirs.has(p.toLowerCase())) keywords.add(p);
+  }
+
+  const result = { docs: [] as string[], tests: [] as string[] };
+
+  // 搜索设计文档（doc/设计/），上限 5 个匹配避免过度 IO
+  const docsDir = path.join(projectDir, "doc", "设计");
+  if (fs.existsSync(docsDir)) {
+    try {
+      for (const f of fs.readdirSync(docsDir)) {
+        // 文件数安全上限：避免大型目录阻塞事件循环
+        if (result.docs.length >= 5) break;
+        const name = f.replace(path.extname(f), "");
+        for (const kw of keywords) {
+          // 双向匹配：关键词出现在文件名中，或文件名出现在关键词中
+          // 跳过过短关键词（≤2 字符），避免误匹配
+          if (kw.length <= 2) continue;
+          if (name.includes(kw) || kw.includes(name)) {
+            result.docs.push(`doc/设计/${f}`);
+            break;
+          }
+        }
+      }
+    } catch { /* 忽略读取错误 */ }
+  }
+
+  // 搜索测试文件（tests/，递归两层）
+  const testsDir = path.join(projectDir, "tests");
+  if (fs.existsSync(testsDir)) {
+    result.tests = findTestFiles(testsDir, keywords, projectDir);
+  }
+
+  return result;
+}
+
+/**
+ * 递归搜索测试文件夹中与给定关键词匹配的文件
+ * 最多递归 3 层，避免性能问题
+ */
+function findTestFiles(
+  dir: string,
+  keywords: Set<string>,
+  projectDir: string,
+  depth = 0,
+): string[] {
+  if (depth > 2) return [];
+  const results: string[] = [];
+  try {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        results.push(...findTestFiles(full, keywords, projectDir, depth + 1));
+      } else {
+        // 结果上限：避免大型测试目录扫描过多文件
+        if (results.length >= 5) break;
+        const name = entry.name.replace(path.extname(entry.name), "");
+        for (const kw of keywords) {
+          // 跳过过短关键词（≤2 字符），避免误匹配
+          if (kw.length <= 2) continue;
+          if (name.includes(kw) || kw.includes(name)) {
+            results.push(path.relative(projectDir, full));
+            break;
+          }
+        }
+      }
+    }
+  } catch { /* 忽略权限错误 */ }
+  return results;
+}
+
+/**
  * V2.0 第二层：调 LLM API 做语义判断 + 生成赛博分身消息（含透明度标注）
  * 异步，不阻塞事件管线
  */
 async function generateTriggerMessage(
   filePath: string,
-  trigger: { fullContent: string; humanDescription: string; confidence: string; matchGlobs: string }
+  trigger: { fullContent: string; humanDescription: string; confidence: string; matchGlobs: string } | null,
+  relatedDocs?: string[],
+  relatedTests?: string[],
 ): Promise<string | null> {
   const filename = path.basename(filePath);
+
+  // 构建习惯检查部分 prompt
+  const habitSection = trigger ? `- 匹配到的习惯规则：
+
+${trigger.fullContent}` : "（本次无习惯规则匹配，仅检查文档/测试关联）";
+
+  // 构建文档/测试检查部分 prompt（触发线 1 增强）
+  const docTestSection = buildDocTestPrompt(relatedDocs, relatedTests);
+
   const systemPrompt = `你是用户的赛博分身。你像用户一样思考。
 
 当前场景：
 - 用户刚编辑了文件：${filePath}
-- 匹配到的习惯规则：
+${habitSection}
 
-${trigger.fullContent}
+${docTestSection}
 
 你的任务：
-1. 判断此次文件编辑是否真正匹配此习惯的语义
+1. 如果存在习惯规则：判断此次文件编辑是否真正匹配此习惯的语义
    （不只看文件名匹配 glob，要理解操作上下文和改动性质）
-2. 如果匹配，以用户口吻生成一条提醒消息。格式：
+2. 如果存在关联文件（设计文档/测试）：检查是否需要提醒用户同步更新
+3. 生成提醒消息。格式：
 
-> [分形] 匹配习惯「${trigger.humanDescription}」
-> (glob: ${trigger.matchGlobs}) | 置信度 ${trigger.confidence}
+> [分形] 匹配习惯「<习惯名>」
+> (glob: <glob>) | 置信度 <confidence>
 
 你刚生成了 ${filename}，按我的习惯，你先审查一遍。
-重点看：[根据 trigger 中 action.focus 的具体内容填充]
+${trigger ? `重点看：[根据习惯规则中 action.focus 的具体内容填充]` : ""}
 
-3. 如果不匹配（例如改动太小、不是目标文件类型），返回空字符串
-   （不要任何解释文字）
-4. 措辞必须用"按我的习惯"——你是用户的分身在说话
-5. 不执行审查，不写文件，只说话
+4. 如果有关联文件需要同步：
+   在消息末尾追加一行提醒：
+   > 你刚改的文件有关联文档/测试，考虑同步更新：<文件列表>
+
+5. 如果不匹配且无需提醒，返回空字符串（不要任何解释文字）
+6. 措辞必须用"按我的习惯"——你是用户的分身在说话
+7. 不执行审查，不写文件，只说话
 
 返回纯文本（不要 JSON 包裹）。`;
 
-  debug(`TRIGGER: 调 LLM 语义判断 — ${filename} (习惯: ${trigger.humanDescription})`);
+  const label = trigger ? `习惯: ${trigger.humanDescription}` : "仅文档/测试检查";
+  debug(`TRIGGER: 调 LLM 语义判断 — ${filename} (${label})`);
   // 使用 callLLM 辅助函数，含 thinking 参数降级逻辑；15s 超时
   const result = await callLLM(
     {
@@ -1180,6 +1284,25 @@ ${trigger.fullContent}
   }
   debug(`TRIGGER: LLM 返回 ${result.length} bytes`);
   return result.trim();
+}
+
+/**
+ * 构建文档/测试检查维度的 prompt 片段（触发线 1 增强）
+ */
+function buildDocTestPrompt(
+  docs?: string[],
+  tests?: string[],
+): string {
+  const items: string[] = [];
+  if (docs && docs.length > 0) {
+    items.push(`- 关联设计文档：${docs.join("、")}`);
+  }
+  if (tests && tests.length > 0) {
+    items.push(`- 关联测试文件：${tests.join("、")}`);
+  }
+  if (items.length === 0) return "（无关联文档或测试文件）";
+  return `触发线 1 检查——文件关联：
+${items.join("\n")}`;
 }
 
 // ============================================================
@@ -1392,12 +1515,12 @@ function decayAndPersist(
 async function checkAndExtractCommitKnowledge(
   projectDir: string | undefined,
   memoryPaths: string[],
-) {
+): Promise<boolean> {
   const cwd = projectDir || ".";
-  if (!fs.existsSync(path.join(cwd, ".git"))) return;
+  if (!fs.existsSync(path.join(cwd, ".git"))) return false;
 
   // 读取上次检查时间戳
-  const lastCheckFile = path.join(MEMORIES_DIR, ".commit-last-check.json");
+  let lastCheckFile = path.join(MEMORIES_DIR, ".commit-last-check.json");
   let lastCheck = "";
   try {
     if (fs.existsSync(lastCheckFile)) {
@@ -1414,17 +1537,17 @@ async function checkAndExtractCommitKnowledge(
     commitMsg = execSync("git log -1 --format='%s%n%b'", { cwd, encoding: "utf-8", timeout: 5000 }).trim();
     commitTs = execSync("git log -1 --format='%aI'", { cwd, encoding: "utf-8", timeout: 5000 }).trim();
     changedFiles = execSync("git diff HEAD~1 --stat", { cwd, encoding: "utf-8", timeout: 5000 }).trim();
-  } catch { return; }
+  } catch { return false; }
 
-  if (!commitMsg || commitTs <= lastCheck) return; // 无新提交
+  if (!commitMsg || commitTs <= lastCheck) return false; // 无新提交
 
   // 保存本次检查时间
   try { fs.writeFileSync(lastCheckFile, JSON.stringify({ ts: commitTs }), "utf-8"); } catch {}
 
-  // 跳过自动提交
+  // 跳过自动提交的知识提取，但仍返回 true（流水线层面算交付已完成）
   if (/^(Merge|Bump|chore\(deps\)|\(bot\))/i.test(commitMsg.split("\n")[0])) {
     debug(`触发线5: 跳过自动提交 — "${commitMsg.slice(0, 50)}"`);
-    return;
+    return true;
   }
 
   debug(`触发线5: 新提交检测 — "${commitMsg.slice(0, 80)}"`);
@@ -1452,15 +1575,15 @@ async function checkAndExtractCommitKnowledge(
       },
       "触发线5（知识提取）",
     );
-    if (!json) return;
+    if (!json) return true; // LLM 失败，但新提交已确认
 
     let parsed: any;
     try { parsed = JSON.parse(json); } catch {
       const m = json.match(/\{[\s\S]*\}/);
-      if (m) try { parsed = JSON.parse(m[0]); } catch { return; }
-      else return;
+      if (m) try { parsed = JSON.parse(m[0]); } catch { return true; }
+      else return true;
     }
-    if (!parsed || parsed.action === "skip") { debug("触发线5: LLM 判断无需记录"); return; }
+    if (!parsed || parsed.action === "skip") { debug("触发线5: LLM 判断无需记录"); return true; }
 
     if (parsed.items) {
       for (const item of parsed.items) {
@@ -1471,6 +1594,7 @@ async function checkAndExtractCommitKnowledge(
       }
     }
   } catch (err) { debug(`触发线5: LLM 异常 ${String(err)}`); }
+  return true; // 无论知识提取成功与否，新提交已检测到
 }
 
 // ============================================================
@@ -1530,8 +1654,10 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
   function queueWarning(msg: string) {
     if (pendingWarnings.length < MAX_PENDING_WARNINGS) pendingWarnings.push(msg);
   }
-  /** 文件编辑审查队列：file.edited 入队 → session.idle 批量消费 */
-  let pendingReviewQueue: Array<{ filePath: string; trigger: { fullContent: string; humanDescription: string; confidence: string; matchGlobs: string }; sessionID: string }> = [];
+  /** 文件编辑审查队列：file.edited 入队 → session.idle 批量消费
+   *  trigger 可能为 null（仅文档/测试检查，无习惯匹配）
+   */
+  let pendingReviewQueue: Array<{ filePath: string; trigger: { fullContent: string; humanDescription: string; confidence: string; matchGlobs: string } | null; relatedDocs: string[]; relatedTests: string[]; sessionID: string }> = [];
   /** 习惯确认去重：每进程只注入一次，避免刷屏 */
   let _habitReminderInjected = false;
 
@@ -1596,71 +1722,39 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
       debug("HOOK: system.transform fired");
       _fractalDebug("HOOK: system.transform fired");
 
-      // 注入频率控制：递增轮数计数器
-      turnCounter++;
-      const isNudgeTurn = turnCounter % NUDGE_INTERVAL === 0;
-      debug(`FRACTAL: turn=${turnCounter}, nudge=${isNudgeTurn} (interval=${NUDGE_INTERVAL})`);
-
       // ============================================================
-      // V3.8 缓存优化精简版 system.transform
+      // V3.8.2 缓存优化：system.transform 仅注入稳定内容
+      // turnCounter / isNudgeTurn 已迁移至 chat.message（由聊天钩子管理轮次）
+      // 动态内容（流水线/计划/知识/警告）已迁移至 chat.message 钩子
+      // 确保 S2 跨轮次完全一致 → DeepSeek 请求边界持久化缓存可完整命中
       // ============================================================
 
-      // 1. 核心规则（外部模板，保持最小化）
+      // 1. 核心规则（外部模板，保持最小化 → 绝对稳定）
       const coreRules = loadPrompt("core-rules.md",
         `## 分形 v2.1\n**元知识记录**（手动 + 自主两路）\n…`);
       output.system.push(`\n${coreRules}\n`);
 
-      // 2. 行为前门（精简为 1 行 blockquote）
-      if (alignmentGate.active) {
-        output.system.push(`\n> ⚠️ **行为前门 v${alignmentGate.version}**：先对齐再动手。按需求→数据→边界→影响逐维度质询，用户确认「设计对齐」后方可编码。\n`);
-        debug(`行为前门: 精简注入 (v${alignmentGate.version})`);
-      }
-
-      // 3. 流水线进度（1 行）
-      if (pipelineState?.status === "active" && !alignmentGate.active) {
-        output.system.push(`\n> 🔄 **流水线**: ${pipelineState.context.feature} | ${pipelineState.currentStage} | ${pipelineState.complexity}\n`);
-      }
-
-      // 4. 知识索引（nudge turn 注入，最多 5 条，每行 ≤60 字符）
-      if (isNudgeTurn) {
-        const memPaths = getMemoryPaths(projectDir);
-        const { blocks: kb } = mergeBlocksAndTriggers(memPaths);
-        const knowledge = kb.filter((b: any) => b.type === "knowledge" && b.status !== "pending");
-        const maxShow = 5;
-        if (knowledge.length > 0) {
-          const lines = [];
-          for (const k of knowledge.slice(0, maxShow)) {
-            const label = (k as any).label || (k as any).fileName || "?";
-            const desc = ((k as any).description || "").slice(0, 55);
-            lines.push(`- **${label}**${desc ? " → " + desc : ""}`);
-          }
-          const suffix = knowledge.length > maxShow ? `\n> *共 ${knowledge.length} 条，展示 ${maxShow}*` : "";
-          output.system.push(`\n### 核心知识\n${lines.join("\n")}${suffix}\n`);
-        }
-      }
-
-      // 5. 计划摘要（有则注入）
-      const activePlans = getActivePlanSummaries();
-      if (activePlans.length > 0) {
-        output.system.push(`\n### 当前计划\n${activePlans.join("\n")}\n`);
-      }
-
-      // 6. checkbox 规则 + 中文
+      // 2. 联网查证规则 + 中文末尾（固定内容 → 绝对稳定）
       output.system.push(`\n${loadPrompt("websearch-rules.md", "")}\n`);
       output.system.push("\n以中文思考，除非用户要求，否则回答也使用中文。\n");
 
-      return; // ← V3.8 精简版，跳过原有复杂注入逻辑
+      return; // S2 稳定 → 跳过所有动态注入
+
+      // 以下为旧版动态注入代码（V3.8.2 已迁移至 chat.message，保留供参考）
+      const isNudgeTurn = false; // 占位——消除 dead code 中 LSP 报错
 
       // V3.8 缓存优化：稳定内容用 stableBuf 先推，可变内容用 varBuf 后推
       // OC 截断 15K 预算时，stableBuf 内容在截断线前 → 前缀稳定 → 缓存命中
       const varBuf: string[] = [];
 
-      // ---- 触发线 6：行为前门（V3.7）grill 对齐指令 ----
-      if (alignmentGate.active) {
-        const gatePrompt = `\n> ## ⚠️ 行为前门 v${alignmentGate.version}：先对齐，再动手\n>\n> 在看到用户明确确认（如"开始实现""没问题做吧""go ahead"或"跳过对齐""直接做"）之前，禁止修改任何代码。你必须：\n>\n> 1. **一次只问一个问题**，给出推荐答案后等待用户回复\n> 2. **能查到的事实自己去查**——从代码/文档/环境发现的信息不问用户\n> 3. **决策归属用户**——逐条确认，不跳过\n> 4. 按以下维度逐个质询（不限于此）：\n>    a) 用户需要什么？（输入/输出/可观察行为）\n>    b) 数据模型：什么持久化？什么瞬态？真相源在哪？\n>    c) 边界情况和失败模式\n>    d) 哪些文件/模块受影响？\n> 5. 所有维度覆盖完毕，用户确认后，输出「设计对齐，开始实现」——此时方可开始编码\n>\n> > 习惯确认、联网查证等分形规则在行为前门激活时仍需遵守。\n`;
-        varBuf.push(gatePrompt);
-        debug(`行为前门: system.transform 注入 grill 指令 (v${alignmentGate.version})`);
-      }
+
+
+      // TODO: 行为前门 prompt 暂停（2026-07-28），恢复时取消下面注释
+      // if (alignmentGate.active) {
+      //   const gatePrompt = `\n> ## ⚠️ 行为前门 v${alignmentGate.version}：先对齐，再动手\n>\n> 在看到用户明确确认（如"开始实现""没问题做吧""go ahead"或"跳过对齐""直接做"）之前，禁止修改任何代码。你必须：\n>\n> 1. **一次只问一个问题**，给出推荐答案后等待用户回复\n> 2. **能查到的事实自己去查**——从代码/文档/环境发现的信息不问用户\n> 3. **决策归属用户**——逐条确认，不跳过\n> 4. 按以下维度逐个质询（不限于此）：\n>    a) 用户需要什么？（输入/输出/可观察行为）\n>    b) 数据模型：什么持久化？什么瞬态？真相源在哪？\n>    c) 边界情况和失败模式\n>    d) 哪些文件/模块受影响？\n> 5. 所有维度覆盖完毕，用户确认后，输出「设计对齐，开始实现」——此时方可开始编码\n>\n> > 习惯确认、联网查证等分形规则在行为前门激活时仍需遵守。\n`;
+      //   varBuf.push(gatePrompt);
+      //   debug(`行为前门: system.transform 注入 grill 指令 (v${alignmentGate.version})`);
+      // }
 
       // ---- 流水线：跨会话恢复 + 阶段指令注入 ----
       if (!pipelineState) {
@@ -1718,9 +1812,16 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
       } catch { /* 静默 */ }
 
       // 触发线 5：提交后知识提取（轮询 git log，不依赖工具 hook）
+      // V3 修复：检测到新提交时联动流水线 DELIVERING → IDLE 过渡
       try {
         if (!isLinePaused("5")) {
-          await checkAndExtractCommitKnowledge(projectDir, memoryPaths);
+          // V3 修复：DELIVERING 阶段检测到新提交 → 自动过渡到 idle
+          const hasNewCommit = await checkAndExtractCommitKnowledge(projectDir, memoryPaths);
+          // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
+          if (hasNewCommit && pipelineState?.currentStage === "delivering" && pipelineState?.status === "active") {
+            pipelineState = pipeline.transitionToNextStage(pipelineState!);
+            debug("流水线: 交付完成 → idle（检测到新提交）");
+          }
         }
       } catch { /* 静默 */ }
 
@@ -2139,11 +2240,76 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
         } catch { /* 静默 */ }
       }
 
-      // pendingWarnings 已迁移至 system.transform 注入（V3.8）
-      // 原因：output.parts.unshift() 导致 OC Session.updatePart 找不到 sessionID → 会话中断
-      if (pendingWarnings.length > 0) {
-        debug(`chat.message: 已排队 ${pendingWarnings.length} 条警告（等待 system.transform 注入）`);
+      // ============================================================
+      // V3.8.2 缓存优化：动态上下文注入（从 system.transform 迁移）
+      // 动态内容附加到用户消息尾部，不影响 S2 系统提示词的前缀稳定性
+      // ============================================================
+
+      // 递增轮次计数器（原本在 system.transform 最前面，现移到 chat.message）
+      turnCounter++;
+
+      const dynamicSections: string[] = [];
+
+      // 1. 流水线进度（1 行）
+      if (pipelineState?.status === "active" && !alignmentGate.active) {
+        dynamicSections.push(`> 🔄 **流水线**: ${pipelineState.context.feature} | ${pipelineState.currentStage} | ${pipelineState.complexity}`);
       }
+
+      // 2. 计划摘要（有则注入）
+      const activePlans = getActivePlanSummaries();
+      if (activePlans.length > 0) {
+        dynamicSections.push(`### 当前计划\n${activePlans.join("\n")}`);
+      }
+
+      // 3. 知识索引（nudge turn 注入，最多 5 条，每行 ≤60 字符）
+      const isNudgeTurn = turnCounter % NUDGE_INTERVAL === 0;
+      if (isNudgeTurn) {
+        try {
+          const memPaths = getMemoryPaths(projectDir);
+          const { blocks: kb } = getBlocksCached(memPaths as unknown as Record<string, unknown>);
+          const knowledge = kb.filter((b: any) => b.type === "knowledge" && b.status !== "pending");
+          if (knowledge.length > 0) {
+            const lines = [];
+            const maxShow = 5;
+            for (const k of knowledge.slice(0, maxShow)) {
+              const label = (k as any).label || (k as any).fileName || "?";
+              const desc = ((k as any).description || "").slice(0, 55);
+              lines.push(`- **${label}**${desc ? " → " + desc : ""}`);
+            }
+            const suffix = knowledge.length > maxShow ? `\n*共 ${knowledge.length} 条，展示 ${maxShow}*` : "";
+            dynamicSections.push(`### 参考知识\n${lines.join("\n")}${suffix}`);
+          }
+        } catch { /* 静默——知识索引加载失败不影响核心功能 */ }
+      }
+
+      // 4. pendingWarnings 注入（从 system.transform 迁移，V3.8.2）
+      if (pendingWarnings.length > 0) {
+        const fullWarningText = pendingWarnings.join(" | ");
+        const MAX_WARNING_CHARS = 500;
+        let warningText = fullWarningText;
+        if (fullWarningText.length > MAX_WARNING_CHARS) {
+          const last = pendingWarnings[pendingWarnings.length - 1];
+          warningText = last.length > MAX_WARNING_CHARS
+            ? last.slice(0, MAX_WARNING_CHARS) + "…"
+            : "…" + fullWarningText.slice(fullWarningText.length - MAX_WARNING_CHARS);
+        }
+        dynamicSections.push(`[分形 Guardian] ${warningText}`);
+        debug(`chat.message 注入 ${pendingWarnings.length} 条警告（${warningText.length} chars）`);
+        pendingWarnings = [];
+      }
+
+      // 注入：修改第一个 text part 的 content，不增减 parts 数组（避免 unshift/push 的 sessionID bug）
+      if (dynamicSections.length > 0) {
+        const dynamicPrefix = "\n" + dynamicSections.join("\n") + "\n";
+        for (const part of (output.parts || [])) {
+          if (part.type === "text" && !part.synthetic && part.text != null) {
+            part.text = dynamicPrefix + part.text;
+            break; // 只修改第一个 text part
+          }
+        }
+      }
+
+      // turnCounter 递增已移至 chat.message 开头（第 2241 行），此处移除重复递增
     },
 
     /**
@@ -2258,9 +2424,24 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
               const ctx = pipeline.extractAlignmentContext(content);
               if (ctx) {
                 pipelineState = pipeline.createPipelineState(ctx);
-                pipeline.writePipelineState(pipelineState);
-                debug(`流水线: 创建 — ${pipelineState.pipelineId} (${pipelineState.complexity})`);
-                const sec = pipeline.splitAlignmentOutput(content);
+                 pipeline.writePipelineState(pipelineState);
+                 debug(`流水线: 创建 — ${pipelineState.pipelineId} (${pipelineState.complexity})`);
+
+                 // V3 修复：门释放后立刻注入 DESIGNING 阶段启动 prompt
+                 // 否则 Agent 需要等到下一轮用户消息 + system.transform 才知道进入设计阶段
+                 const sp = pipeline.getStageStartPrompt(pipelineState);
+                 if (sp) {
+                   const sid = extractSessionID(props);
+                   if (sid) {
+                     client.session.promptAsync({
+                       path: { id: sid },
+                       body: { parts: [{ type: "text", text: sp }] },
+                     }).then(() => debug(`流水线: 注入 DESIGNING 启动 prompt`))
+                       .catch((err: unknown) => debug(`流水线: 注入 prompt 失败 — ${String(err)}`));
+                   }
+                 }
+
+                 const sec = pipeline.splitAlignmentOutput(content);
                 if (sec) {
                   if (sec.llm) {
                     const bf = path.join(BLOCKS_DIR, `${ctx.feature}-对齐共识.md`);
@@ -2285,6 +2466,22 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
                 implementIdleTurns = 0;
                 debug(`流水线: 编码完成 → ${pipelineState.currentStage}`);
                 try { client.session.promptAsync({ text: "编码完成。进入**交付审查**。" }); } catch {/* */}
+              } else if (pipelineState.currentStage === "planning" && pipeline.isStageComplete(pipelineState, projectDir || ".")) {
+                // V3 修复：PLANNING 阶段完成后自动过渡到 IMPLEMENTING
+                // 检测依据：plans/ 目录下存在对应功能名的计划文件（无 Agent 文字信号，用文件系统判断）
+                pipelineState = pipeline.transitionToNextStage(pipelineState);
+                debug(`流水线: 计划完成 → ${pipelineState.currentStage}`);
+                // 计划完成后注入 IMPLEMENTING 阶段启动 prompt
+                const sp = pipeline.getStageStartPrompt(pipelineState);
+                if (sp) {
+                  const sid = extractSessionID(props);
+                  if (sid) {
+                    client.session.promptAsync({
+                      path: { id: sid },
+                      body: { parts: [{ type: "text", text: sp }] },
+                    }).catch(() => {});
+                  }
+                }
               }
             }
           }
@@ -2331,7 +2528,13 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
         if (!filePath || typeof filePath !== "string") return;
 
         const trigger = matchFileTriggers(filePath, projectDir);
-        if (!trigger) return;
+        // 触发线 1 增强：额外检查是否有对应的设计文档/测试文件
+        // projectDir 可能为 undefined（外部编辑），仅在有项目路径时检查
+        const related = projectDir ? findRelatedFiles(filePath, projectDir) : { docs: [], tests: [] };
+        const hasDocOrTest = related.docs.length > 0 || related.tests.length > 0;
+
+        // 既无习惯匹配又无关联文档/测试 → 无需审查
+        if (!trigger && !hasDocOrTest) return;
 
         const sessionID = extractSessionID(props);
         if (!sessionID) return;
@@ -2341,8 +2544,9 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
           const removed = pendingReviewQueue.shift();
           debug(`TRIGGER: 队列已满（≥20），丢弃最旧项 — ${removed?.filePath}`);
         }
-        pendingReviewQueue.push({ filePath, trigger, sessionID });
-        debug(`TRIGGER: 排队 ${filePath}（等待 session.idle）`);
+        pendingReviewQueue.push({ filePath, trigger, relatedDocs: related.docs, relatedTests: related.tests, sessionID });
+        const reason = trigger ? `习惯: ${trigger.humanDescription}` : "仅文档/测试检查";
+        debug(`TRIGGER: 排队 ${filePath}（${reason}）`);
       }
 
       // session.idle 时消费队列：LLM 语义判断 → prompt 注入（异步，不 await）
@@ -2366,8 +2570,10 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
 
         debug(`TRIGGER: session 结束 → 消费 ${matched.length} 条审查${remaining.length > 0 ? `（${remaining.length} 条保留等待其他会话）` : ""}`);
         for (const item of matched) {
-          debug(`TRIGGER: 异步 LLM 语义判断 — ${item.filePath}（习惯: ${item.trigger.humanDescription}）`);
-          generateTriggerMessage(item.filePath, item.trigger).then((msg) => {
+          // 调试信息兼容习惯匹配 与 仅文档/测试检查 两种情况
+          const label = item.trigger ? `习惯: ${item.trigger.humanDescription}` : "仅文档/测试检查";
+          debug(`TRIGGER: 异步 LLM 语义判断 — ${item.filePath}（${label}）`);
+          generateTriggerMessage(item.filePath, item.trigger, item.relatedDocs, item.relatedTests).then((msg) => {
             if (!msg) return;
             client.session.promptAsync({
               path: { id: item.sessionID },
