@@ -27,12 +27,12 @@ export type Complexity = "simple" | "complex";
 /** 流水线阶段 */
 export type PipelineStage = "idle" | "aligning" | "designing" | "planning" | "implementing" | "delivering";
 
-/** 流水线路由（V1 只有 full——所有任务走完整 5 阶段） */
-export type PipelineRoute = "full";
+/** 流水线路由 */
+export type PipelineRoute = "full" | "direct"; // direct: flash 分类器判断 simple，跳过 designing+planning
 
 /** 单个阶段的执行状态 */
 export interface StageStatus {
-  status: "pending" | "active" | "completed";
+  status: "pending" | "active" | "completed" | "skipped"; // skipped: flash 分类器判断 simple 时跳过
   startedAt?: string;
   completedAt?: string;
 }
@@ -309,16 +309,22 @@ function generatePipelineId(feature: string): string {
   return `${date}-${time}-${shortFeature}`;
 }
 
-/** 创建新的流水线状态（门释放后调用） */
-export function createPipelineState(ctx: AlignmentContext): PipelineState {
-  const complexity = assessComplexity(ctx);
+/** 创建新的流水线状态（门释放后调用）
+ * @param ctx 对齐上下文
+ * @param flashComplexity flash 分类器结果（可选）— simple 时跳过 planning，直接 implementing
+ */
+export function createPipelineState(ctx: AlignmentContext, flashComplexity?: "simple" | "complex"): PipelineState {
+  const complexity = flashComplexity === "simple" ? "simple" : assessComplexity(ctx);
   const pipelineId = generatePipelineId(ctx.feature);
+
+  // flash 判断为 simple → 跳过 planning → 直接 implementing
+  const initialStage: PipelineStage = flashComplexity === "simple" ? "implementing" : "designing";
 
   const stages: Record<Exclude<PipelineStage, "idle">, StageStatus> = {
     aligning: { status: "completed", completedAt: new Date().toISOString() },
-    designing: { status: "active", startedAt: new Date().toISOString() },
-    planning: { status: "pending" },
-    implementing: { status: "pending" },
+    designing: initialStage === "implementing" ? { status: "skipped", completedAt: new Date().toISOString() } : { status: "active", startedAt: new Date().toISOString() },
+    planning: initialStage === "implementing" ? { status: "skipped", completedAt: new Date().toISOString() } : { status: "pending" },
+    implementing: { status: initialStage === "implementing" ? "active" : "pending", ...(initialStage === "implementing" ? { startedAt: new Date().toISOString() } : {}) },
     delivering: { status: "pending" },
   };
 
@@ -326,10 +332,10 @@ export function createPipelineState(ctx: AlignmentContext): PipelineState {
     pipelineId,
     status: "active",
     taskType: ctx.taskType,
-    route: "full",
+    route: flashComplexity === "simple" ? "direct" : "full",
     complexity,
     context: ctx,
-    currentStage: "designing",
+    currentStage: initialStage,
     stages,
     startedAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -453,7 +459,7 @@ export function getStageStartPrompt(state: PipelineState): string | null {
       const isCodeTask = state.taskType === "web-app" || state.taskType === "plugin";
       if (isCodeTask) {
         return [
-          `行为前门对齐完成。现在进入**设计阶段**（任务类型：${typeLabel}）。`,
+          `需求对齐完成。现在进入**设计阶段**（任务类型：${typeLabel}）。`,
           "",
           `请使用 \`mxy-design-doc\` skill 为「${f}」创建设计方案。`,
           `复杂度：${state.complexity === "simple" ? "简单（要点即可，1-2 段）" : "复杂（完整模板）"}。`,

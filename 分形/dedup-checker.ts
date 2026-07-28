@@ -208,7 +208,7 @@ function buildDedupPrompt(a: MemoryItem, b: MemoryItem): { systemPrompt: string;
  */
 async function callLLMForDedup(
   a: MemoryItem, b: MemoryItem,
-  apiConfig: { baseURL: string; apiKey: string; model: string }
+  apiConfig: { baseURL: string; apiKey: string; primaryModel: string }
 ): Promise<{ duplicate: boolean; reason: string } | null> {
   const { systemPrompt, userPrompt } = buildDedupPrompt(a, b);
 
@@ -222,7 +222,7 @@ async function callLLMForDedup(
         "Authorization": `Bearer ${apiConfig.apiKey}`,
       },
       body: JSON.stringify({
-        model: apiConfig.model,
+        model: apiConfig.primaryModel,
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt },
@@ -263,7 +263,7 @@ async function callLLMForDedup(
 export async function runDedupCheck(
   turnCounter: number,
   forceCheck: boolean,
-  apiConfig: { baseURL: string; apiKey: string; model: string } | null,
+  apiConfig: { baseURL: string; apiKey: string; primaryModel: string } | null,
   debugLog: (msg: string) => void,
   projectDir?: string,
 ): Promise<DedupResult[]> {

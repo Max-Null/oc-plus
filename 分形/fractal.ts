@@ -5,7 +5,7 @@
  * - 触发线 1：文件编辑审查（队列化：file.edited → 排队 → session.idle 批量注入）
  * - 触发线 2：连续无进展循环 + 无反馈环检测（滑动窗口→system.transform 注入）
  * - 触发线 4：主动联网查证（断言检测→分级计数器→system.transform 注入）
- * - 触发线 6：行为前门（改动意图检测→强制对齐→用户确认后释放，grill-me 理念融入分形）
+ * - 触发线 6：行为前门（V3.7 —— 已停用，被 V3.8 flash 分类器替代）
  *
  * 三层记忆架构：
  * - 全局：~/.config/opencode/memories/
@@ -81,7 +81,7 @@ const ASSERTION_RE = /(?:不支持|做不到|只有\s*\d+\s*种|(?<!\S)(?:没有
 // 触发线 4：联网工具名检测（包含 websearch / webfetch 等）
 const WEBSEARCH_TOOLS = /websearch|web_search|webfetch/;
 
-// 触发线 6：行为前门 — 改动意图检测关键词
+// 触发线 6：行为前门 — 改动意图检测关键词（V3.7 已停用，保留供参考）
 const MODIFICATION_ACTION_WORDS = [
   "修改", "改一下", "改下", "改一改", "改动", "重写", "rewrite",
   "实现", "做", "开发", "开发一下", "implement",
@@ -110,7 +110,7 @@ const MODIFICATION_CONTEXT_WORDS = [
   "module", "component", "interface", "service", "controller", "middleware",
   "plugin", "extension", "config", "settings", "feature",
 ];
-// 跳过词：纯问答、审查、提交等操作不触发行为前门
+// 跳过词：纯问答、审查、提交等操作不触发行为前门（V3.7 已停用，保留供参考）
 const GATE_SKIP_PATTERNS = [
   // 怎么X：怎么办/怎么回/怎么样/怎么弄 → 纯问答，不激活
   /^(为什么|怎么[办回样弄]|是什么|怎么回事|啥意思|什么意思)/,
@@ -722,7 +722,32 @@ function getNewEvents(): string[] {
   return newLines.slice(-MAX_EVENTS_FOR_ANALYSIS);
 }
 
-async function getApiConfig(): Promise<{ apiKey: string; baseURL: string; model: string } | null> {
+/** API 配置 —— 含主模型和 flash 轻量模型 */
+interface ApiConfig {
+  apiKey: string;
+  baseURL: string;
+  /** 主模型（写作战/复杂分析/编码） */
+  primaryModel: string;
+  /** Flash 轻量模型（分类器/意图判断，无则与 primaryModel 相同） */
+  flashModel: string;
+}
+
+/** getApiConfig 的内存缓存（30s TTL，避免频繁读盘 + JSON 解析） */
+let _apiConfigCache: { cfg: ApiConfig; ts: number } | null = null;
+
+/** flash 响应缓存：30s 内同消息不重复调 API */
+let _flashResponseCache: {
+  text: string;
+  result: { complexity: "simple" | "complex" | "no_action"; reasoning: string; estimatedFiles: number } | null;
+  ts: number;
+} = { text: "", result: null, ts: 0 };
+
+async function getApiConfig(): Promise<ApiConfig | null> {
+  // 缓存命中 → 直接返回，跳过读盘和 JSON 解析
+  if (_apiConfigCache && (Date.now() - _apiConfigCache.ts) < 30_000) {
+    return _apiConfigCache.cfg;
+  }
+
   const configPath = path.join(OC_CONFIG, "opencode.json");
   // 读配置失败时等待 200ms 后重试一次，两次都失败才返回 null
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -745,30 +770,35 @@ async function getApiConfig(): Promise<{ apiKey: string; baseURL: string; model:
         return null;
       }
 
-      // 从 provider.models 中获取可用模型列表，匹配式选择分析用模型
-      // 优先选含 "flash" 关键字的（更经济），否则用当前模型
+      // 从 provider.models 中获取可用模型列表，匹配式选择 flash 模型
+      // 优先选含 "flash" 关键字的（更经济），否则降级用主模型
       const models = provider?.models as Record<string, unknown> | undefined;
-      let analysisModel = currentModel;
+      let flashModel = currentModel;
       if (models) {
         const modelKeys = Object.keys(models);
-        // 先找 flash 模型，找不到则用当前模型（当前模型也要在 models 中存在）
+        // 先找 flash 模型
         const flashKey = modelKeys.find(k => k.toLowerCase().includes("flash"));
         if (flashKey) {
-          analysisModel = flashKey;
+          flashModel = flashKey;
         } else if (!modelKeys.includes(currentModel)) {
           // 当前模型不在 provider 的模型列表中，用第一个可用模型兜底
-          analysisModel = modelKeys[0] || currentModel;
+          flashModel = modelKeys[0] || currentModel;
         }
+        // 若 flash 模型不存在且 currentModel 在列表中 → flashModel = currentModel（已默认）
       }
 
-      return {
+      const cfg: ApiConfig = {
         apiKey: opts.apiKey as string,
         baseURL: (opts.baseURL as string).replace(/\/+$/, ""),
-        model: analysisModel,
+        primaryModel: currentModel,
+        flashModel,
       };
+      _apiConfigCache = { cfg, ts: Date.now() };
+      return cfg;
     } catch { /* 首次失败后重试 */ }
     if (attempt === 0) await new Promise(r => setTimeout(r, 200));
   }
+  _apiConfigCache = null; // 两次都失败，清缓存
   return null;
 }
 
@@ -811,7 +841,8 @@ async function callLLM(
           "Content-Type": "application/json",
           "Authorization": `Bearer ${c.apiKey}`,
         },
-        body: JSON.stringify({ model: c.model, ...reqBody }),
+        // reqBody.model 可覆盖默认主模型（flash 分类器等场景用 config.flashModel 传参）
+        body: JSON.stringify({ model: reqBody.model || c.primaryModel, ...reqBody }),
         signal: controller.signal,
       });
     } finally {
@@ -856,6 +887,81 @@ async function callLLM(
     debug(`${debugPrefix}: 降级重试成功 ✓（已适配当前模型）`);
   }
   return second.data;
+}
+
+/**
+ * V3-B flash 复杂度分类器 —— 借鉴 CC auto mode 的三轴判断 + CC 认证标准
+ *
+ * 设计要点：
+ * - 独立 sideQuery，不污染 system prompt（与 CC yoloClassifier 同模式）
+ * - 三轴结构化评分（范围 + 复杂度 + 不确定性），比自然语言规则一致性好
+ * - 30s 响应缓存，同消息不重复调 API
+ * - 影子模式（shadow）先观察，准确率达标后切换 active
+ */
+async function classifyTaskComplexity(userText: string): Promise<{
+  complexity: "simple" | "complex" | "no_action";
+  reasoning: string;
+  estimatedFiles: number;
+} | null> {
+  // 30s 缓存命中 → 直接返回，不调 API
+  if (_flashResponseCache.text === userText && (Date.now() - _flashResponseCache.ts) < 30_000) {
+    debug("FLASH-CLASSIFIER: 缓存命中");
+    return _flashResponseCache.result;
+  }
+
+  const config = await getApiConfig();
+  if (!config) return null;
+
+  const prompt = `分析用户意图和任务复杂度。
+
+用户消息: """${userText}"""
+
+用三个维度评分（每维 0-2 分）：
+- 范围：影响多少文件？（1文件=0, 2-4文件=1, 5+文件=2）
+- 复杂度：机械修改/架构决策？（机械=0, 中度重构=1, 架构设计=2）
+- 不确定性：方案明确/多个可选？（已知方案=0, 部分不确定=1, 完全开放=2）
+
+总分 0-2 → simple | 3-6 → complex
+补充规则：纯聊天/确认/询问/git操作/代码解释 → no_action
+        能一句话描述diff → simple
+
+返回纯JSON（不要markdown代码块，直接 {}）:
+{"complexity":"simple|complex|no_action","reasoning":"简短中文理由","estimatedFiles":1}`;
+
+  const result = await callLLM(
+    {
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0,
+      max_tokens: 200,
+      model: config.flashModel, // 使用 flash 模型（动态获取，无则降级 primaryModel）
+    },
+    "FLASH-CLASSIFIER",
+    10000, // 10s 超时
+  );
+
+  if (!result) return null;
+
+  try {
+    const jsonMatch = result.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return null;
+    const parsed = JSON.parse(jsonMatch[0]) as {
+      complexity: string; reasoning: string; estimatedFiles: number;
+    };
+    // 类型收窄：非法值降级为 no_action
+    if (!["simple", "complex", "no_action"].includes(parsed.complexity)) {
+      parsed.complexity = "no_action";
+    }
+    const validated = {
+      complexity: parsed.complexity as "simple" | "complex" | "no_action",
+      reasoning: parsed.reasoning || "未知",
+      estimatedFiles: typeof parsed.estimatedFiles === "number" ? parsed.estimatedFiles : 0,
+    };
+    // 写入缓存
+    _flashResponseCache = { text: userText, result: validated, ts: Date.now() };
+    return validated;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -1681,7 +1787,7 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
   // 知识注入精准度：捕获上轮用户消息，用于关键词匹配
   let lastUserMessage = "";
 
-  // 行为前门（V3.7）：检测改动意图 → 强制对齐 → 用户确认后释放
+  // 行为前门状态（V3.7 —— 已停用，变量保留供 pipeline 兼容）
   // 内存变量——对齐是瞬态的，跨重启不需保留
   let alignmentGate: { active: boolean; version: number } = {
     active: false,
@@ -1692,6 +1798,18 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
   let pipelineState: pipeline.PipelineState | null = null;
   let gateJustReleased = false;
   let implementIdleTurns = 0;
+
+  // V3-B flash 复杂度分类器 —— 独立 sideQuery，不污染 system prompt
+  // 借鉴 CC auto mode 分类器设计：后台异步调 flash 模型判断意图 + 复杂度
+  let pendingFlashClassification: {
+    complexity: "simple" | "complex";
+    reasoning: string;
+    estimatedFiles: number;
+    timestamp: number;
+  } | null = null;
+
+  // 影子模式开关：shadow=只打日志观察，active=实际驱动 pipeline
+  const FLASH_CLASSIFIER_MODE: "shadow" | "active" = "shadow";
 
   // keep-warm 状态（V3.8 缓存优化）：知识项被匹配后保持热度
   const KEEP_WARM_FILE = path.join(MEMORIES_DIR, ".keepwarm-state.json");
@@ -2140,6 +2258,27 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
         pendingWarnings = [];
       }
 
+      // === S3：动态知识索引（轻量，末尾注入，不影响 S1/S2 缓存） ===
+      // 注：复杂分层知识（tiered groups）已在 S2 注入，此处仅注入简明索引
+      // nudge turn: 注入实际列表 | non-nudge: 注入占位保持结构一致
+      {
+        const nudged = turnCounter % NUDGE_INTERVAL === 0;
+        const memPaths = getMemoryPaths(projectDir);
+        const { blocks: kb } = getBlocksCached(memPaths as unknown as Record<string, unknown>);
+        const knowledge = kb.filter((b: any) => b.type === "knowledge" && b.status !== "pending");
+        if (nudged && knowledge.length > 0) {
+          const lines: string[] = [];
+          const maxShow = 5;
+          for (const k of knowledge.slice(0, maxShow)) {
+            const label = (k as any).label || (k as any).fileName || "?";
+            const desc = ((k as any).description || "").slice(0, 55);
+            lines.push(`- **${label}**${desc ? " → " + desc : ""}`);
+          }
+          const suffix = knowledge.length > maxShow ? `\n*共 ${knowledge.length} 条，展示 ${maxShow}*` : "";
+          output.system.push(`\n### 参考知识\n${lines.join("\n")}${suffix}\n`);
+        }
+      }
+
       // V3.8.1 诊断：记录完整 system prompt 结构（发给 LLM 前）
       {
         const sections = output.system.map((s, i) => {
@@ -2176,31 +2315,54 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
         .join(" ");
       if (userText) lastUserMessage = userText;
 
-      // ---- 触发线 6：行为前门（V3.7）----
-      if (userText) {
-        // 释放检测（优先级最高——用户说"开始实现"或"跳过"时立即释放）
-        if (alignmentGate.active && (isAlignmentConfirmation(userText) || isAlignmentSkip(userText))) {
-          const wasSkip = isAlignmentSkip(userText);
-          alignmentGate.active = false;
-          gateJustReleased = true;
-          debug(`行为前门: ${wasSkip ? "跳过" : "确认"}释放 (v${alignmentGate.version})`);
-        }
-        // 激活检测——未激活时检测改动意图
-        else if (!alignmentGate.active && isModificationRequest(userText)) {
-          alignmentGate.active = true;
-          alignmentGate.version++;
-          debug(`行为前门: 激活 (v${alignmentGate.version})，消息: ${userText.slice(0, 80)}`);
-          // 首轮注入完整指令（system.transform 尚未看到 gate 状态）
-          queueWarning(
-            `行为前门 v${alignmentGate.version} 已激活 | ⚠️ 先对齐再动手——在看到用户确认前禁止修改代码。按维度逐个质询：需求→数据模型→边界→影响范围。全部确认后输出「设计对齐，开始实现」`
-          );
-        }
-        // 已激活但非释放——注入简短提醒（system.transform 已有完整指令）
-        else if (alignmentGate.active) {
-          queueWarning(`行为前门 v${alignmentGate.version} 仍在质询中 | ⚠️ 继续对齐（禁止编码），等待用户确认`);
-        }
-      }
+      // ---- 触发线 6：行为前门（V3.7）— 已停用（2026-07-28）----
+      // 原因：prompt 文本劝导 LLM 自我约束 → system prompt 污染 → token 命中率暴跌
+      // 替代：V3.8 flash 复杂度分类器（独立 sideQuery，不污染 system prompt）
+      // 恢复时取消下面注释 ↓
+      // if (userText) {
+      //   // 释放检测（优先级最高——用户说"开始实现"或"跳过"时立即释放）
+      //   if (alignmentGate.active && (isAlignmentConfirmation(userText) || isAlignmentSkip(userText))) {
+      //     const wasSkip = isAlignmentSkip(userText);
+      //     alignmentGate.active = false;
+      //     gateJustReleased = true;
+      //     debug(`行为前门: ${wasSkip ? "跳过" : "确认"}释放 (v${alignmentGate.version})`);
+      //   }
+      //   // 激活检测——未激活时检测改动意图
+      //   else if (!alignmentGate.active && isModificationRequest(userText)) {
+      //     alignmentGate.active = true;
+      //     alignmentGate.version++;
+      //     debug(`行为前门: 激活 (v${alignmentGate.version})，消息: ${userText.slice(0, 80)}`);
+      //     queueWarning(
+      //       `行为前门 v${alignmentGate.version} 已激活 | ⚠️ 先对齐再动手——在看到用户确认前禁止修改代码。按维度逐个质询：需求→数据模型→边界→影响范围。全部确认后输出「设计对齐，开始实现」`
+      //     );
+      //   }
+      //   // 已激活但非释放——注入简短提醒
+      //   else if (alignmentGate.active) {
+      //     queueWarning(`行为前门 v${alignmentGate.version} 仍在质询中 | ⚠️ 继续对齐（禁止编码），等待用户确认`);
+      //   }
+      // }
 
+      // ---- V3-B flash 需求意图 + 复杂度分类 ----
+      // 条件：有用户文本 + 长度≥3（跳过"嗯""好"+ 无活跃 pipeline（避免干扰进行中的任务）
+      if (userText && userText.length >= 3 && !pipelineState) {
+        classifyTaskComplexity(userText).then(result => {
+          if (!result || result.complexity === "no_action") return; // 静默
+          const label = `[${result.complexity}] ${result.reasoning}（估${result.estimatedFiles}文件）`;
+          debug(`FLASH-CLASSIFIER: ${label}`);
+
+          if (FLASH_CLASSIFIER_MODE === "shadow") return; // 影子模式：仅观察
+
+          // 活跃模式：写入缓存供 pipeline 使用（60s TTL 在 createPipeline 处检查）
+          pendingFlashClassification = {
+            complexity: result.complexity,
+            reasoning: result.reasoning,
+            estimatedFiles: result.estimatedFiles,
+            timestamp: Date.now(),
+          };
+        }).catch(e => {
+          debug(`FLASH-CLASSIFIER: 调用失败: ${e}`);
+        });
+      }
 
       // ---- 流水线：逃课拦截 + 取消检测 ----
       if (pipelineState && pipelineState.status === "active" && userText) {
@@ -2255,34 +2417,16 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
         dynamicSections.push(`> 🔄 **流水线**: ${pipelineState.context.feature} | ${pipelineState.currentStage} | ${pipelineState.complexity}`);
       }
 
-      // 2. 计划摘要（有则注入）
-      const activePlans = getActivePlanSummaries();
-      if (activePlans.length > 0) {
-        dynamicSections.push(`### 当前计划\n${activePlans.join("\n")}`);
+      // 2. 计划摘要（仅首轮注入，避免每轮污染 system prompt）
+      // 跨会话恢复由 AGENTS.md core-rules 处理：新会话开始时主动告知用户
+      if (turnCounter === 0) {
+        const activePlans = getActivePlanSummaries();
+        if (activePlans.length > 0) {
+          dynamicSections.push(`> 📋 有 ${activePlans.length} 个活跃计划，需要时可查看: plans/ 目录`);
+        }
       }
 
-      // 3. 知识索引（nudge turn 注入，最多 5 条，每行 ≤60 字符）
-      const isNudgeTurn = turnCounter % NUDGE_INTERVAL === 0;
-      if (isNudgeTurn) {
-        try {
-          const memPaths = getMemoryPaths(projectDir);
-          const { blocks: kb } = getBlocksCached(memPaths as unknown as Record<string, unknown>);
-          const knowledge = kb.filter((b: any) => b.type === "knowledge" && b.status !== "pending");
-          if (knowledge.length > 0) {
-            const lines = [];
-            const maxShow = 5;
-            for (const k of knowledge.slice(0, maxShow)) {
-              const label = (k as any).label || (k as any).fileName || "?";
-              const desc = ((k as any).description || "").slice(0, 55);
-              lines.push(`- **${label}**${desc ? " → " + desc : ""}`);
-            }
-            const suffix = knowledge.length > maxShow ? `\n*共 ${knowledge.length} 条，展示 ${maxShow}*` : "";
-            dynamicSections.push(`### 参考知识\n${lines.join("\n")}${suffix}`);
-          }
-        } catch { /* 静默——知识索引加载失败不影响核心功能 */ }
-      }
-
-      // 4. pendingWarnings 注入（从 system.transform 迁移，V3.8.2）
+      // 3. pendingWarnings 注入（从 system.transform 迁移，V3.8.2）
       if (pendingWarnings.length > 0) {
         const fullWarningText = pendingWarnings.join(" | ");
         const MAX_WARNING_CHARS = 500;
@@ -2298,15 +2442,12 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
         pendingWarnings = [];
       }
 
-      // 注入：修改第一个 text part 的 content，不增减 parts 数组（避免 unshift/push 的 sessionID bug）
+      // 注入：将 dynamic content 注入 output.context（对 AI 可见，不污染用户消息显示）
+      // 此前直接修改 part.text 导致"### 参考知识"等出现在用户消息中
       if (dynamicSections.length > 0) {
         const dynamicPrefix = "\n" + dynamicSections.join("\n") + "\n";
-        for (const part of (output.parts || [])) {
-          if (part.type === "text" && !part.synthetic && part.text != null) {
-            part.text = dynamicPrefix + part.text;
-            break; // 只修改第一个 text part
-          }
-        }
+        (output as any).context = (output as any).context || [];
+        (output as any).context.push(dynamicPrefix);
       }
 
       // turnCounter 递增已移至 chat.message 开头（第 2241 行），此处移除重复递增
@@ -2423,21 +2564,33 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
               gateJustReleased = false;
               const ctx = pipeline.extractAlignmentContext(content);
               if (ctx) {
-                pipelineState = pipeline.createPipelineState(ctx);
-                 pipeline.writePipelineState(pipelineState);
-                 debug(`流水线: 创建 — ${pipelineState.pipelineId} (${pipelineState.complexity})`);
+                // 读取 flash 分类器结果（60s TTL），simple 时跳过 planning
+                const fc = pendingFlashClassification;
+                const isFlashValid = fc && (Date.now() - fc.timestamp) < 60_000;
+                const flashComplexity = isFlashValid ? fc.complexity : undefined;
+                pendingFlashClassification = null; // 读后即清，防止污染下次
+                if (flashComplexity === "simple") {
+                  debug(`流水线: flash 分类为 simple，跳过 designing+planning，直接 implementing`);
+                }
 
-                 // V3 修复：门释放后立刻注入 DESIGNING 阶段启动 prompt
-                 // 否则 Agent 需要等到下一轮用户消息 + system.transform 才知道进入设计阶段
-                 const sp = pipeline.getStageStartPrompt(pipelineState);
-                 if (sp) {
-                   const sid = extractSessionID(props);
-                   if (sid) {
-                     client.session.promptAsync({
-                       path: { id: sid },
-                       body: { parts: [{ type: "text", text: sp }] },
-                     }).then(() => debug(`流水线: 注入 DESIGNING 启动 prompt`))
-                       .catch((err: unknown) => debug(`流水线: 注入 prompt 失败 — ${String(err)}`));
+                pipelineState = pipeline.createPipelineState(ctx, flashComplexity);
+                  // 用本地 snapshot 避免 TS 在闭包中收窄失败
+                  const pstate = pipelineState;
+                  pipeline.writePipelineState(pstate);
+                  debug(`流水线: 创建 — ${pstate.pipelineId} (${pstate.complexity})`);
+
+                  // V3 修复：门释放后立刻注入当前阶段启动 prompt
+                  // direct 路由 → IMPLEMENTING prompt，full 路由 → DESIGNING prompt
+                  const sp = pipeline.getStageStartPrompt(pstate);
+                  if (sp) {
+                    const sid = extractSessionID(props);
+                    if (sid) {
+                      const stage = pstate.currentStage;
+                      client.session.promptAsync({
+                        path: { id: sid },
+                        body: { parts: [{ type: "text", text: sp }] },
+                      }).then(() => debug(`流水线: 注入 ${stage} 启动 prompt`))
+                        .catch((err: unknown) => debug(`流水线: 注入 prompt 失败 — ${String(err)}`));
                    }
                  }
 

@@ -325,3 +325,41 @@ describe("完整流水线流转", () => {
     assert.strictEqual(complexState.complexity, "complex");
   });
 });
+
+// ============================================================
+// V3-B：flash 分类器驱动的 direct 路由 + skipped 状态
+// ============================================================
+
+describe("V3-B flash 分类器 — direct 路由 & skipped 状态", () => {
+  it("flash complex → full 路由，走正常 5 阶段", () => {
+    const ctx = makeCtx({ feature: "flash 判断复杂" });
+    const state = createPipelineState(ctx, "complex");
+    assert.strictEqual(state.route, "full");
+    assert.strictEqual(state.currentStage, "designing");
+    assert.strictEqual(state.stages.designing.status, "active");
+    assert.strictEqual(state.stages.planning.status, "pending");
+    assert.strictEqual(state.stages.implementing.status, "pending");
+  });
+
+  it("flash simple → direct 路由，跳过 designing 和 planning，直接 implementing", () => {
+    const ctx = makeCtx({ feature: "flash 判断简单", estimatedFiles: 1 });
+    const state = createPipelineState(ctx, "simple");
+    assert.strictEqual(state.route, "direct");
+    assert.strictEqual(state.complexity, "simple");
+    assert.strictEqual(state.currentStage, "implementing");
+    // designing 和 planning 被跳过
+    assert.strictEqual(state.stages.designing.status, "skipped");
+    assert.strictEqual(state.stages.planning.status, "skipped");
+    // implementing 直接激活
+    assert.strictEqual(state.stages.implementing.status, "active");
+    assert.ok(state.stages.implementing.startedAt);
+  });
+
+  it("无 flash 分类（null/undefined）→ full 路由，回退到 assessComplexity", () => {
+    const ctx = makeCtx({ feature: "无 flash 结果", estimatedFiles: 1 });
+    const state = createPipelineState(ctx); // 无第二参数
+    assert.strictEqual(state.route, "full");
+    assert.strictEqual(state.currentStage, "designing");
+    assert.strictEqual(state.stages.designing.status, "active");
+  });
+});
