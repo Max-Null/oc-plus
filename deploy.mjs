@@ -615,8 +615,9 @@ function main() {
   console.log("   OPENCODE_DISABLE_CLAUDE_CODE_PROMPT=1");
   console.log("");
   console.log("8. 模型别名（Agent 分层缓存优化必须）:");
-  console.log("   在 opencode.json 顶层添加 modelAliases 段（见 opencode.json.example）:");
-  console.log('   "modelAliases": { "DS_MODEL_LOW": "ds:deepseek-v4-flash", "DS_MODEL_HIGH": "ds:deepseek-v4-pro" }');
+  console.log("   在项目根目录 opencode.json.example 顶层配置 modelAliases 段");
+  console.log("   deploy.mjs 部署时自动读取并替换 agent 文件中的 DS_MODEL_LOW/HIGH 占位符");
+  console.log("   ⚠️ 不要写入 ~/.config/opencode/opencode.json（OC 不识别的自定义字段，会导致启动报错）");
   console.log("");
   console.log("完成后重启 OpenCode。验证: memories/.fractal-healthcheck 应出现（分形自检标记）。");
 
