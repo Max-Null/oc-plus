@@ -30,6 +30,8 @@ const SRC = {
   pipelineTs: path.join(__dirname, "分形", "pipeline.ts"),
   dedupTs: path.join(__dirname, "分形", "dedup-checker.ts"),
   searchTs: path.join(__dirname, "分形", "search.ts"),
+  engineBm25: path.join(__dirname, "分形", "engine", "bm25.ts"),
+  engineCore: path.join(__dirname, "分形", "engine", "engine.ts"),
   promptsLib: path.join(__dirname, "分形", "lib", "prompts.ts"),
   scripts: path.join(__dirname, "分形", "scripts"),
   promptTemplates: path.join(__dirname, "分形", "prompts"),
@@ -99,12 +101,45 @@ function readOcProviderConfig() {
 }
 
 /**
- * 替换 agent 文件中的 model: 行，使用实际 OC 环境的 provider 配置
- * 格式: model: "providerId:modelName"
- * 注意：OC 已知 bug 要求 agent markdown 中 model 值必须加双引号，否则解析会加尾部 /
+ * 从实际 OC 环境的 opencode.json 读取 modelAliases 配置
+ * 返回 { [alias]: "providerId:modelName" } 或 null
  */
-function patchAgentModel(content, providerId, modelName) {
-  const modelLine = `model: "${providerId}/${modelName}"`;
+function readModelAliases() {
+  const ocConfigPath = path.join(OC, "opencode.json");
+  if (!fs.existsSync(ocConfigPath)) return null;
+  try {
+    const config = JSON.parse(fs.readFileSync(ocConfigPath, "utf-8"));
+    return config.modelAliases || null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * 替换 agent 文件中的 model: 行
+ * - 优先解析 modelAliases（如 DS_MODEL_LOW → ds:deepseek-v4-flash）
+ * - 别名未配置则回退到默认 provider 配置
+ * - 别名都不是则用原始默认 provider
+ * 格式: model: "providerId/modelName"（OC 要求双引号）
+ */
+function patchAgentModel(content, providerId, modelName, aliases) {
+  // 提取当前 model 值（去掉引号和换行）
+  const modelMatch = content.match(/^model:\s*"([^"]+)"/m);
+  const currentModel = modelMatch ? modelMatch[1] : "";
+  let resolvedModel = currentModel;
+
+  // 若当前 model 是已知别名 → 解析
+  if (aliases && aliases[currentModel]) {
+    resolvedModel = aliases[currentModel];
+  } else if (currentModel && currentModel.includes(":")) {
+    // 已是完整 provider:model 引用 → 替换 provider/model 为实际配置
+    resolvedModel = `${providerId}/${modelName}`;
+  } else if (currentModel && currentModel.includes("/")) {
+    resolvedModel = `${providerId}/${modelName}`;
+  }
+
+  // 兜底：别名/格式都未匹配 → 保持原始值不变（避免 model: "" 导致 OC 报 unknown provider）
+  const modelLine = resolvedModel ? `model: "${resolvedModel}"` : `model: "${currentModel}"`;
   return content.replace(/^model:\s*.+$/m, modelLine);
 }
 
@@ -334,10 +369,18 @@ function main() {
   console.log("[2/7] deploying agents...");
   // 从实际 OC 环境读取 provider 配置，部署时自动替换 agent 文件中的 model 引用
   const ocProvider = readOcProviderConfig();
+  const modelAliases = readModelAliases();
   if (ocProvider) {
     log(".", `provider 配置: ${ocProvider.providerId}:${ocProvider.modelName}`);
   } else {
     log("!", "未读取到 OC provider 配置，agent model 将使用源文件默认值");
+  }
+  if (modelAliases) {
+    const aliasList = Object.entries(modelAliases).map(([k, v]) => `${k}=>${v}`).join(", ");
+    log(".", `modelAliases: ${aliasList}`);
+  } else {
+    log("!", "modelAliases 未配置——DS_MODEL_LOW/DS_MODEL_HIGH 将不解析，agent 可能报 unknown provider");
+    log("!", "请在 opencode.json 中参照 opencode.json.example 添加 modelAliases 段");
   }
   const agentFiles = [
     { src: path.join(SRC.agents, "双星.md"), label: "double-star agent" },
@@ -347,12 +390,14 @@ function main() {
     { src: path.join(SRC.fractalAgent, "助理.md"), label: "assistant agent" },
   ];
   for (const a of agentFiles) {
-    // 读取源文件内容，替换 model 引用为实际 OC 环境的 provider 配置
-    if (ocProvider && fs.existsSync(a.src)) {
+    // 读取源文件内容，解析 model 别名后替换为实际配置
+    if (fs.existsSync(a.src)) {
       try {
         ensureDir(DST.agents);
         let content = fs.readFileSync(a.src, "utf-8");
-        content = patchAgentModel(content, ocProvider.providerId, ocProvider.modelName);
+        if (ocProvider) {
+          content = patchAgentModel(content, ocProvider.providerId, ocProvider.modelName, modelAliases);
+        }
         const dest = path.join(DST.agents, path.basename(a.src));
         fs.writeFileSync(dest, content, "utf-8");
         stats.deployed.push(a.label);
@@ -362,7 +407,8 @@ function main() {
         stats.failed.push(a.label);
       }
     } else {
-      copyFile(a.src, DST.agents, a.label);
+      stats.skipped.push(a.label);
+      log("x", `源文件不存在: ${a.src}`);
     }
   }
   console.log("");
@@ -375,6 +421,8 @@ function main() {
   copyFile(SRC.pipelineTs, DST.pluginsLib, "pipeline.ts (流水线引擎)");
   copyFile(SRC.dedupTs, DST.pluginsLib, "dedup-checker.ts (去重审查)");
   copyFile(SRC.searchTs, DST.pluginsLib, "search.ts (V4 BM25 搜索引擎)");
+  copyFile(SRC.engineBm25, DST.pluginsLib, "bm25.ts (知识引擎 BM25)");
+  copyFile(SRC.engineCore, DST.pluginsLib, "engine.ts (知识引擎核心)");
   copyFile(SRC.promptsLib, DST.pluginsLib, "lib/prompts.ts");
   copyFile(SRC.agentsPriority, DST.plugins, "agents-priority.ts");
   // 修正 fractal-guardian.ts 中的 import 路径：子模块部署在 lib/ 下
@@ -385,7 +433,14 @@ function main() {
     content = content.replace('"./dedup-checker.js"', '"./lib/dedup-checker.ts"');
     content = content.replace('"./lib/prompts.js"', '"./lib/prompts.ts"');
     content = content.replace('"./search.js"', '"./lib/search.ts"');
+    content = content.replace('"./engine/engine.js"', '"./lib/engine.ts"');
     fs.writeFileSync(fractalDest, content, "utf-8");
+
+    // 修正 search.ts 重导出路径：部署后 bm25.ts 在 lib/，非 engine/
+    const searchDest = path.join(DST.pluginsLib, "search.ts");
+    let searchContent = fs.readFileSync(searchDest, "utf-8");
+    searchContent = searchContent.replace('"./engine/bm25.js"', '"./bm25.ts"');
+    fs.writeFileSync(searchDest, searchContent, "utf-8");
   }
   console.log("");
 
@@ -419,8 +474,20 @@ function main() {
   console.log("");
 
   // [6/7] deploy prompt templates
+  // 注意：以下为显式列表，非 copyDir 全量复制。新增模板文件时需同步更新此列表。
   console.log("[6/7] deploying prompt templates...");
-  copyDir(SRC.promptTemplates, DST.fractalPrompts, false);
+  const promptTemplates = [
+    "core-rules.md",
+    "websearch-rules.md",
+    "assertion-reminder.md",
+    "pipeline-stage-designing.md",
+    "pipeline-stage-planning.md",
+    "agent-baseline-artisan.md",
+    "agent-baseline-strategist.md",
+  ];
+  for (const t of promptTemplates) {
+    copyFile(path.join(SRC.promptTemplates, t), DST.fractalPrompts, t);
+  }
   console.log("");
 
   // [7/7] deploy skills
@@ -454,7 +521,8 @@ function main() {
     // 源码中的 import 路径与部署后不同——对比时对源码做同样替换
     .replace('"./pipeline.js"', '"./lib/pipeline.ts"')
     .replace('"./dedup-checker.js"', '"./lib/dedup-checker.ts"')
-    .replace('"./lib/prompts.js"', '"./lib/prompts.ts"');
+    .replace('"./lib/prompts.js"', '"./lib/prompts.ts"')
+    .replace('"./search.js"', '"./lib/search.ts"');
   const dstFractal = fs.readFileSync(path.join(DST.plugins, "fractal-guardian.ts"), "utf-8");
   const srcHash = crypto.createHash("md5").update(srcFractal).digest("hex");
   const dstHash = crypto.createHash("md5").update(dstFractal).digest("hex");
@@ -545,6 +613,10 @@ function main() {
   console.log("7. 环境变量检查:");
   console.log("   OPENCODE_EXPERIMENTAL_LSP_TOOL=true");
   console.log("   OPENCODE_DISABLE_CLAUDE_CODE_PROMPT=1");
+  console.log("");
+  console.log("8. 模型别名（Agent 分层缓存优化必须）:");
+  console.log("   在 opencode.json 顶层添加 modelAliases 段（见 opencode.json.example）:");
+  console.log('   "modelAliases": { "DS_MODEL_LOW": "ds:deepseek-v4-flash", "DS_MODEL_HIGH": "ds:deepseek-v4-pro" }');
   console.log("");
   console.log("完成后重启 OpenCode。验证: memories/.fractal-healthcheck 应出现（分形自检标记）。");
 

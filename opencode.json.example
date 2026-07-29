@@ -6,6 +6,15 @@
   "model": "ds:deepseek-v4-pro",
   "default_agent": "双星",
 
+  // ── 模型别名（agent markdown 中引用，deploy.mjs 部署时替换）──
+  // DS_MODEL_LOW = 编码执行等轻量任务（Flash）
+  // DS_MODEL_HIGH = 推理、审查等重度任务（Pro）
+  // 新用户直接复制即可，OC 不认识这些 key，仅 deploy.mjs 使用
+  "modelAliases": {
+    "DS_MODEL_LOW": "ds:deepseek-v4-flash",
+    "DS_MODEL_HIGH": "ds:deepseek-v4-pro"
+  },
+
   // ── 插件 ──
   // OC 桌面端 1.18.x 不支持 plugins/ 目录自动发现（会报 UnsupportedContentType）。
   // 本地插件必须使用 file:/// 绝对路径显式列出，npm 包用短名称。

@@ -27,7 +27,7 @@ import { getSystemPrompt, getUserPrompt } from "./lib/prompts.js";
 
 import * as pipeline from "./pipeline.js";
 import * as dedup from "./dedup-checker.js";
-import { BM25Index } from "./search.js";
+import { KnowledgeEngine } from "./engine/engine.js";
 // ============================================================
 // 诊断模式：在 ~/.config/opencode/memories/.fractal-debug 创建空文件即可启用
 // 日志输出到 ~/.config/opencode/memories/fractal-startup.log + console
@@ -46,8 +46,9 @@ const _fractalDebug = _IS_FRACTAL_DEBUG
 
 _fractalDebug("MODULE: imported");
 
-// V4 记忆搜索引擎 — 全局单例，跨轮存活（纯 JS BM25，零依赖）
-const v4searchIndex = new BM25Index();
+// V4 知识引擎 — 全局单例，跨轮存活（纯 JS BM25，零依赖）
+// 延迟初始化：目录路径依赖 MEMORIES_DIR + projectDir，在 system.transform 首次执行时 init()
+const v4knowledgeEngine = new KnowledgeEngine([]);
 
 // V2.0：PluginInput 最小化接口
 interface PluginInput {
@@ -2269,25 +2270,26 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
       }
 
       // === S3：动态知识索引（轻量，末尾注入，不影响 S1/S2 缓存） ===
-      // 注：复杂分层知识（tiered groups）已在 S2 注入，此处仅注入简明索引
-      // nudge turn: 注入实际列表 + V4 BM25 精准搜索 | non-nudge: 注入占位保持结构一致
+      // nudge turn: 注入实际列表 + V4 精准搜索 | non-nudge: 注入占位保持结构一致
       {
         const nudged = turnCounter % NUDGE_INTERVAL === 0;
         const memPaths = getMemoryPaths(projectDir);
         const { blocks: kb } = getBlocksCached(memPaths as unknown as Record<string, unknown>);
         const knowledge = kb.filter((b: any) => b.type === "knowledge" && b.status !== "pending");
 
-        // V4：用 knowledge 列表重建 BM25 索引（轻量，40 篇 < 1ms）
+        // V4：将缓存的 blocks 喂入知识引擎 → BM25 搜索
         try {
-          const docs = knowledge.map((k: any) => ({
-            filePath: k.fileName || "",
-            fileName: k.fileName || "?",
-            title: k.label || k.fileName || "?",
+          const engineBlocks = knowledge.map((k: any) => ({
+            fileName: k.fileName || "",
+            relPath: k.fileName || "",
+            status: k.status || "",
+            type: k.type || "",
+            label: k.label || k.fileName || "?",
             description: k.description || "",
-            // body 不在缓存中（getBlocksCached 仅返元数据），用 title + desc 足够
-            body: "",
+            priority: k.priority || 0,
+            body: (k.value || "").slice(0, 200), // 正文首 200 字
           }));
-          v4searchIndex.rebuild(docs);
+          v4knowledgeEngine.feedBlocks(engineBlocks);
         } catch {
           // 索引构建失败不影响 S3 注入，静默降级
         }
@@ -2297,10 +2299,10 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
           const query = (lastUserMessage || "").trim();
           if (query.length >= 2) {
             try {
-              const results = v4searchIndex.search(query, 5);
+              const results = v4knowledgeEngine.search(query, 5);
               if (results.length > 0) {
                 const searchLines = results.map(r =>
-                  `- 🎯 **${r.doc.title}** → ${r.doc.description.slice(0, 50)}`
+                  `- 🎯 **${r.doc.label}** → ${r.doc.description.slice(0, 50)}`
                 );
                 output.system.push(`\n### 🎯 精准匹配\n${searchLines.join("\n")}\n`);
               }
@@ -2810,14 +2812,16 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
           if (!sessionID) return;
 
           const levelName = (mp: string) => ({ "0": "全局", "1": "个人项目级", "2": "共享项目级" })[mp] || "未知";
+          // 过滤无描述的块（根因是 block 文件缺少 description 元数据，这里做最后兜底）
           const pendingList = [
-            ...pendingBlocks.map((b: any) =>
-              `- **${b.description || "（无描述）"}**（建议：${b.suggested_status || "suggest"}·${levelName(b.memPathIndex)}）`
+            ...pendingBlocks.filter((b: any) => b.description).map((b: any) =>
+              `- **${b.description}**（建议：${b.suggested_status || "suggest"}·${levelName(b.memPathIndex)}）`
             ),
-            ...pendingTriggers.map((t: any) =>
-              `- **${t.human_description || "（无描述）"}**（建议：${t.suggested_status || "suggest"}·${levelName(t.memPathIndex)}）`
+            ...pendingTriggers.filter((t: any) => t.human_description).map((t: any) =>
+              `- **${t.human_description}**（建议：${t.suggested_status || "suggest"}·${levelName(t.memPathIndex)}）`
             ),
           ].join("\n");
+          if (!pendingList) return; // 全部被过滤，跳过提醒
 
           const reminder = `\n## 🟡 分形：有待确认的习惯\n\n上次操作中发现以下新模式，有空时确认：\n\n${pendingList}\n\n确认方式：说"确认习惯"即可逐条确认\n`;
 
