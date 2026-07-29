@@ -1808,8 +1808,10 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
     timestamp: number;
   } | null = null;
 
-  // 影子模式开关：shadow=只打日志观察，active=实际驱动 pipeline
-  const FLASH_CLASSIFIER_MODE: "shadow" | "active" = "shadow";
+  // 哨兵模式开关（用 object wrapper 防止 TS 字面量收窄；取值: "shadow" | "active"）
+  // — shadow=只打日志观察，active=实际驱动 pipeline
+  // 2026-07-29 切 active：24h 影子观察准确率达标
+  const FLASH_MODE: { active: boolean } = { active: true };
 
   // keep-warm 状态（V3.8 缓存优化）：知识项被匹配后保持热度
   const KEEP_WARM_FILE = path.join(MEMORIES_DIR, ".keepwarm-state.json");
@@ -2350,7 +2352,7 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
           const label = `[${result.complexity}] ${result.reasoning}（估${result.estimatedFiles}文件）`;
           debug(`FLASH-CLASSIFIER: ${label}`);
 
-          if (FLASH_CLASSIFIER_MODE === "shadow") return; // 影子模式：仅观察
+          if (!FLASH_MODE.active) return; // 影子模式：仅观察
 
           // 活跃模式：写入缓存供 pipeline 使用（60s TTL 在 createPipeline 处检查）
           pendingFlashClassification = {
@@ -2359,6 +2361,12 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
             estimatedFiles: result.estimatedFiles,
             timestamp: Date.now(),
           };
+          // 复杂任务且无活跃 pipeline → 注入对齐提示（替代已废弃的 V3.7 行为前门）
+          if (result.complexity === "complex") {
+            queueWarning(
+              `哨兵检测到复杂任务：${result.reasoning}（估${result.estimatedFiles}文件）| ⚠️ 先对齐再动手——逐维质询：需求→数据模型→边界→影响范围。全部确认后回复「设计对齐，开始实现」`
+            );
+          }
         }).catch(e => {
           debug(`FLASH-CLASSIFIER: 调用失败: ${e}`);
         });
@@ -2560,7 +2568,9 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
             }
 
             // ---- 流水线信号检测（assistant 消息） ----
-            if (gateJustReleased && pipeline.checkGateReleaseSignal(content)) {
+            // V3.7 门释放 或 V3.8 flash 哨兵检测到复杂任务 → 创建流水线
+            if ((gateJustReleased || (pendingFlashClassification?.complexity === "complex"))
+                && pipeline.checkGateReleaseSignal(content)) {
               gateJustReleased = false;
               const ctx = pipeline.extractAlignmentContext(content);
               if (ctx) {
