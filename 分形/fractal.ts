@@ -1876,24 +1876,28 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
       //   debug(`行为前门: system.transform 注入 grill 指令 (v${alignmentGate.version})`);
       // }
 
-      // ---- 流水线：跨会话恢复 + 阶段指令注入 ----
       if (!pipelineState) {
         const restored = pipeline.readPipelineState();
-        if (restored && restored.status === "active") {
-          pipelineState = restored;
-          debug(`流水线: 跨会话恢复 — ${pipelineState.pipelineId} (${pipelineState.currentStage})`);
+        if (restored && restored!.status === "active") {
+          pipelineState = restored!;
+          debug(`流水线: 跨会话恢复 — ${restored!.pipelineId} (${restored!.currentStage})`);
         }
       }
-      if (pipelineState && pipelineState.status === "active" && !alignmentGate.active) {
-        const f = pipelineState.context.feature;
-        const s = pipelineState.currentStage;
-        const c = pipelineState.complexity;
+      // snapshot + 显式判空，避免 TS 5.9 在 async 闭包中无法收窄 let 变量
+      const pstate = pipelineState;
+      if (pstate && pstate!.status === "active" && !alignmentGate.active) {
+        const f = pstate!.context.feature;
+        const s = pstate!.currentStage;
+        const c = pstate!.complexity;
         varBuf.push(`\n> 🔄 流水线: ${f} | ${s} | ${c}`);
-        const sp = pipeline.getStageStartPrompt(pipelineState);
+        const sp = pipeline.getStageStartPrompt(pstate!);
         if (sp) varBuf.push(`\n${sp}\n`);
-        if (s !== "idle" && pipelineState.stages[s]?.status === "active") {
-          const done = Object.entries(pipelineState.stages).filter(([, v]) => v.status === "completed").map(([n]) => n).join(" → ");
-          if (done) varBuf.push(`\n已完成：${done}。继续当前阶段「${s}」。`);
+        if (s !== "idle") {
+          const stageKey = s as Exclude<pipeline.PipelineStage, "idle">;
+          if (pstate!.stages[stageKey]?.status === "active") {
+            const done = Object.entries(pstate!.stages).filter(([, v]) => v.status === "completed").map(([n]) => n).join(" → ");
+            if (done) varBuf.push(`\n已完成：${done}。继续当前阶段「${s}」。`);
+          }
         }
       }
 
@@ -1954,7 +1958,7 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
         debug("FRACTAL: 触发 LLM 自主学习分析...");
         const result = await analyzeAndUpdate(newEvents, memoryPaths);
         if (result && result !== "NO_NEW_HABITS") {
-          applyAnalysisResult(result, memoryPaths);
+          applyAnalysisResult(result!, memoryPaths);
         } else {
           debug("FRACTAL: 无新习惯或 LLM 未返回有效结果");
         }
@@ -2083,8 +2087,8 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
         if (reranked) {
           // 保留分层信息——LLM 重排后按原顺序重新标记 tier
           const tierMap = new Map(selected.map(s => [s.item.label || s.item.fileName, s.tier]));
-          topKnowledge = reranked.map(r => ({ item: r.item, relevance: r.relevance, tier: tierMap.get(r.item.label || r.item.fileName) || "GENERAL" }));
-          debug(`FRACTAL: LLM 重排知识，${reranked.length} 条中 ${reranked.filter(r => r.relevance > 0).length} 条命中`);
+          topKnowledge = reranked!.map(r => ({ item: r.item, relevance: r.relevance, tier: tierMap.get(r.item.label || r.item.fileName) || "GENERAL" }));
+          debug(`FRACTAL: LLM 重排知识，${reranked!.length} 条中 ${reranked!.filter(r => r.relevance > 0).length} 条命中`);
         }
       }
 
@@ -2108,8 +2112,8 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
         const lastKeywords = lastGroup ? extractKeywords(lastMergedDesc) : [];
         const shared = descKeywords.filter(dk => lastKeywords.includes(dk)).length;
 
-        if (lastGroup && lastGroup.tier === s.tier && shared >= 2) {
-          lastGroup.lines.push(line);
+        if (lastGroup && lastGroup!.tier === s.tier && shared >= 2) {
+          lastGroup!.lines.push(line);
           lastMergedDesc = desc;
         } else {
           pushGroups.push({ tier: s.tier, lines: [line] });
