@@ -27,6 +27,7 @@ import { getSystemPrompt, getUserPrompt } from "./lib/prompts.js";
 
 import * as pipeline from "./pipeline.js";
 import * as dedup from "./dedup-checker.js";
+import { BM25Index } from "./search.js";
 // ============================================================
 // 诊断模式：在 ~/.config/opencode/memories/.fractal-debug 创建空文件即可启用
 // 日志输出到 ~/.config/opencode/memories/fractal-startup.log + console
@@ -44,6 +45,9 @@ const _fractalDebug = _IS_FRACTAL_DEBUG
   : (_label: string): void => {/* noop — 诊断模式未开启 */};
 
 _fractalDebug("MODULE: imported");
+
+// V4 记忆搜索引擎 — 全局单例，跨轮存活（纯 JS BM25，零依赖）
+const v4searchIndex = new BM25Index();
 
 // V2.0：PluginInput 最小化接口
 interface PluginInput {
@@ -2266,13 +2270,46 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
 
       // === S3：动态知识索引（轻量，末尾注入，不影响 S1/S2 缓存） ===
       // 注：复杂分层知识（tiered groups）已在 S2 注入，此处仅注入简明索引
-      // nudge turn: 注入实际列表 | non-nudge: 注入占位保持结构一致
+      // nudge turn: 注入实际列表 + V4 BM25 精准搜索 | non-nudge: 注入占位保持结构一致
       {
         const nudged = turnCounter % NUDGE_INTERVAL === 0;
         const memPaths = getMemoryPaths(projectDir);
         const { blocks: kb } = getBlocksCached(memPaths as unknown as Record<string, unknown>);
         const knowledge = kb.filter((b: any) => b.type === "knowledge" && b.status !== "pending");
+
+        // V4：用 knowledge 列表重建 BM25 索引（轻量，40 篇 < 1ms）
+        try {
+          const docs = knowledge.map((k: any) => ({
+            filePath: k.fileName || "",
+            fileName: k.fileName || "?",
+            title: k.label || k.fileName || "?",
+            description: k.description || "",
+            // body 不在缓存中（getBlocksCached 仅返元数据），用 title + desc 足够
+            body: "",
+          }));
+          v4searchIndex.rebuild(docs);
+        } catch {
+          // 索引构建失败不影响 S3 注入，静默降级
+        }
+
         if (nudged && knowledge.length > 0) {
+          // V4：BM25 精准搜索 top-5（基于上轮用户消息）
+          const query = (lastUserMessage || "").trim();
+          if (query.length >= 2) {
+            try {
+              const results = v4searchIndex.search(query, 5);
+              if (results.length > 0) {
+                const searchLines = results.map(r =>
+                  `- 🎯 **${r.doc.title}** → ${r.doc.description.slice(0, 50)}`
+                );
+                output.system.push(`\n### 🎯 精准匹配\n${searchLines.join("\n")}\n`);
+              }
+            } catch {
+              // 搜索失败静默降级，不阻断 S3 注入
+            }
+          }
+
+          // 原有：简明索引列表（前 5 条）
           const lines: string[] = [];
           const maxShow = 5;
           for (const k of knowledge.slice(0, maxShow)) {
