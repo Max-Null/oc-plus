@@ -2297,9 +2297,11 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
         if (nudged && knowledge.length > 0) {
           // V4：BM25 精准搜索 top-5（基于上轮用户消息）
           const query = (lastUserMessage || "").trim();
+          _fractalDebug(`[S3] nudge turn, query="${query}", engine stats: ${v4knowledgeEngine.stats().indexed} indexed / ${v4knowledgeEngine.stats().totalBlocks} total`);
           if (query.length >= 2) {
             try {
               const results = v4knowledgeEngine.search(query, 5);
+              _fractalDebug(`[S3] BM25 search results: ${results.length}, top: ${results.slice(0, 3).map(r => r.doc.label).join(", ")}`);
               if (results.length > 0) {
                 const searchLines = results.map(r =>
                   `- 🎯 **${r.doc.label}** → ${r.doc.description.slice(0, 50)}`
