@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "deploy": "node deploy.mjs",
-    "test": "echo \"wip\""
+    "test": "node test.mjs"
   },
   "keywords": [
     "opencode",
