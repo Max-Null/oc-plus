@@ -11,6 +11,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { BM25Index, type SearchDoc, type SearchResult } from "./bm25.js";
+import { VectorIndex, rrfFuse, type FusedHit } from "./vector.js";
 
 // ============================================================
 // 类型定义
@@ -32,6 +33,7 @@ export interface BlockMeta {
 export interface EngineStats {
   totalBlocks: number;   // 扫描到的 .md 文件总数
   indexed: number;       // 已索引到 BM25 的文档数（有 description 的）
+  vectorReady: boolean;  // 语义向量模型是否就绪（V4 P2）
 }
 
 /** 引擎配置 */
@@ -52,6 +54,8 @@ export class KnowledgeEngine {
   private bm25: BM25Index;
   private blocks: BlockMeta[] = [];
   private initialized = false;
+  /** 语义向量索引（V4 P2，可选挂载；未挂载或模型不可用 → 纯 BM25） */
+  private vector: VectorIndex | null = null;
 
   constructor(dirs: string[], opts?: EngineOptions) {
     this.dirs = dirs.filter(d => typeof d === "string" && d.length > 0);
@@ -80,6 +84,53 @@ export class KnowledgeEngine {
     }));
   }
 
+  /**
+   * 挂载语义向量索引（V4 P2）
+   * 传入的 VectorIndex 负责模型加载与向量重建，引擎只负责融合搜索
+   */
+  setVectorIndex(v: VectorIndex | null): void {
+    this.vector = v;
+  }
+
+  /** 向量索引是否可用（未挂载或模型未就绪 = false） */
+  get vectorReady(): boolean {
+    return this.vector !== null && this.vector.ready;
+  }
+
+  /**
+   * 融合搜索（V4 P2+P3）：向量就绪 → RRF 融合 BM25 + 语义；否则降级纯 BM25
+   * 注意：异步（embedding 是异步 API），调用方需 await；BM25 路径无额外延迟
+   */
+  async searchHybrid(query: string, topK: number = 5): Promise<Array<{ doc: BlockMeta; score: number }>> {
+    if (!this.initialized) this.init();
+
+    // 向量不可用 → 直接降级同步 BM25（保持原有行为与延迟）
+    if (!this.vectorReady) {
+      return this.search(query, topK);
+    }
+
+    // 两路各自取 topK×2（融合后仍有足够的候选）
+    const bm25Results = this.bm25.search(query, topK * 2);
+    const vecResults = await this.vector!.search(query, topK * 2);
+
+    // BM25 零命中时语义兜底；两路都空则空结果
+    if (bm25Results.length === 0 && vecResults.length === 0) return [];
+
+    const fused: FusedHit[] = rrfFuse(
+      bm25Results.map(r => ({ filePath: r.doc.filePath })),
+      vecResults.map(r => ({ filePath: r.filePath })),
+      topK
+    );
+
+    // 融合结果按 filePath 回查 blocks 元数据
+    return fused
+      .map(f => {
+        const doc = this.blocks.find(b => b.fileName === f.filePath);
+        return doc ? { doc, score: f.score } : null;
+      })
+      .filter((x): x is { doc: BlockMeta; score: number } => x !== null);
+  }
+
   /** 返回所有已索引的 knowledge block 元数据 */
   list(): BlockMeta[] {
     if (!this.initialized) this.init();
@@ -92,6 +143,7 @@ export class KnowledgeEngine {
     return {
       totalBlocks: this.blocks.length,
       indexed: this.bm25.size,
+      vectorReady: this.vectorReady,
     };
   }
 

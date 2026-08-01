@@ -28,6 +28,7 @@ import { getSystemPrompt, getUserPrompt } from "./lib/prompts.js";
 import * as pipeline from "./pipeline.js";
 import * as dedup from "./dedup-checker.js";
 import { KnowledgeEngine } from "./engine/engine.js";
+import { VectorIndex } from "./engine/vector.js";
 // ============================================================
 // 诊断模式：在 ~/.config/opencode/memories/.fractal-debug 创建空文件即可启用
 // 日志输出到 ~/.config/opencode/memories/fractal-startup.log + console
@@ -49,6 +50,8 @@ _fractalDebug("MODULE: imported");
 // V4 知识引擎 — 全局单例，跨轮存活（纯 JS BM25，零依赖）
 // 延迟初始化：目录路径依赖 MEMORIES_DIR + projectDir，在 system.transform 首次执行时 init()
 const v4knowledgeEngine = new KnowledgeEngine([]);
+// V4 P2：语义向量索引（懒加载；路径常量在下方声明，故此处先置 null，init 时创建）
+let v4VectorIndex: VectorIndex | null = null;
 
 // V2.0：PluginInput 最小化接口
 interface PluginInput {
@@ -1719,6 +1722,10 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
   ensureDir(MEMORIES_DIR);
   ensureDir(BLOCKS_DIR);
   ensureDir(TRIGGERS_DIR);
+  // V4 P2：语义向量索引（模型缓存到 memories/models/，懒加载不阻塞启动）
+  if (!v4VectorIndex) {
+    v4VectorIndex = new VectorIndex(path.join(MEMORIES_DIR, "models"));
+  }
   rotateLog(DEBUG_LOG, 500 * 1024); // debug 日志上限 500KB
   rotateLog(EVENT_LOG); // 启动时检查一次事件日志
 
@@ -2290,18 +2297,48 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
             body: (k.value || "").slice(0, 200), // 正文首 200 字
           }));
           v4knowledgeEngine.feedBlocks(engineBlocks);
+          // V4 P2：挂载语义向量索引（幂等，模型未加载时 vectorReady=false 走 BM25）
+          v4knowledgeEngine.setVectorIndex(v4VectorIndex);
+
+          // V4 P2：懒加载语义向量模型 + 重建向量索引（异步预热，不阻塞 S3）
+          // 模型文件缓存到 memories/models/ 下（env.cacheDir）
+          const vi = v4VectorIndex!; // 模块级初始化已保证非 null
+          if (!v4knowledgeEngine.vectorReady) {
+            vi.ensureModel()
+              .then(ok => {
+                // ok=false（模型加载失败）→ 静默降级 BM25（vector.ts 已 console.error 留痕）
+                if (!ok) return;
+                const vdocs = engineBlocks
+                  .filter(b => b.description)
+                  .map(b => ({
+                    filePath: b.fileName,
+                    text: `${b.label} ${b.description} ${b.body}`.slice(0, 500),
+                  }));
+                return vi.rebuild(vdocs);
+              })
+              .then(() => {
+                if (vi.ready) {
+                  debug(`[V4] 语义向量就绪：${vi.size} 文档已索引（${vi.dim} 维）`);
+                  _fractalDebug(`[S3] 语义向量就绪：${vi.size} 文档已索引`);
+                }
+              })
+              .catch(e => {
+                // rebuild 失败（embedding 异常）→ 降级 BM25，debug 日志留痕
+                debug(`[V4] 语义向量重建失败，降级纯 BM25: ${String(e)}`);
+              });
+          }
         } catch {
           // 索引构建失败不影响 S3 注入，静默降级
         }
 
         if (nudged && knowledge.length > 0) {
-          // V4：BM25 精准搜索 top-5（基于上轮用户消息）
+          // V4：BM25 + 语义向量融合搜索 top-5（基于上轮用户消息）
           const query = (lastUserMessage || "").trim();
-          _fractalDebug(`[S3] nudge turn, query="${query}", engine stats: ${v4knowledgeEngine.stats().indexed} indexed / ${v4knowledgeEngine.stats().totalBlocks} total`);
+          _fractalDebug(`[S3] nudge turn, query="${query}", engine stats: ${v4knowledgeEngine.stats().indexed} indexed / ${v4knowledgeEngine.stats().totalBlocks} total, vectorReady=${v4knowledgeEngine.stats().vectorReady}`);
           if (query.length >= 2) {
             try {
-              const results = v4knowledgeEngine.search(query, 5);
-              _fractalDebug(`[S3] BM25 search results: ${results.length}, top: ${results.slice(0, 3).map(r => r.doc.label).join(", ")}`);
+              const results = await v4knowledgeEngine.searchHybrid(query, 5);
+              _fractalDebug(`[S3] hybrid search results: ${results.length}, top: ${results.slice(0, 3).map(r => r.doc.label).join(", ")}`);
               if (results.length > 0) {
                 const searchLines = results.map(r =>
                   `- 🎯 **${r.doc.label}** → ${r.doc.description.slice(0, 50)}`

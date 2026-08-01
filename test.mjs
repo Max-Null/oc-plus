@@ -13,7 +13,7 @@ import os from "node:os";
 import path from "node:path";
 
 // 测试文件清单（新增测试文件时在此追加）
-const TEST_FILES = ["分形/engine/test.ts", "分形/search.test.ts"];
+const TEST_FILES = ["分形/engine/test.ts", "分形/engine/vector.test.ts", "分形/search.test.ts"];
 
 const outDir = fs.mkdtempSync(path.join(os.tmpdir(), "oc-plus-test-"));
 
@@ -28,6 +28,9 @@ try {
       platform: "node",
       outfile: outFile,
       logLevel: "silent",
+      // transformers.js 含 onnxruntime 原生 .node 文件，不能 bundle；
+      // 测试运行时从 node_modules 解析（vector.test.ts 用 mock，不真正加载模型）
+      external: ["@huggingface/transformers"],
     });
   }
 

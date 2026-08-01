@@ -32,6 +32,7 @@ const SRC = {
   searchTs: path.join(__dirname, "分形", "search.ts"),
   engineBm25: path.join(__dirname, "分形", "engine", "bm25.ts"),
   engineCore: path.join(__dirname, "分形", "engine", "engine.ts"),
+  engineVector: path.join(__dirname, "分形", "engine", "vector.ts"),
   promptsLib: path.join(__dirname, "分形", "lib", "prompts.ts"),
   scripts: path.join(__dirname, "分形", "scripts"),
   promptTemplates: path.join(__dirname, "分形", "prompts"),
@@ -264,6 +265,51 @@ function installSuperpowers() {
 }
 
 // ============================================================
+// 运行时依赖安装（V4 P2）
+// ============================================================
+
+/**
+ * 安装 @huggingface/transformers + undici 到 ~/.config/opencode/node_modules
+ * - transformers：语义向量索引（vector.ts）运行时动态 import 的模型推理库
+ * - undici：提供 ProxyAgent，让模型下载走系统代理（Windows 注册表代理场景）
+ * 已存在则跳过；失败不阻断部署（向量功能自动降级 BM25）。
+ */
+function installTransformers() {
+  const destDir = path.join(OC, "node_modules", "@huggingface", "transformers");
+  if (fs.existsSync(destDir)) {
+    log(".", "@huggingface/transformers 已安装，跳过");
+  } else {
+    try {
+      log(".", "安装 @huggingface/transformers（首次需下载 ~10MB，约 10-20 秒）...");
+      execSync(
+        `npm install @huggingface/transformers --prefix "${OC}"`,
+        { stdio: "pipe", timeout: 180000 }
+      );
+      log("V", "@huggingface/transformers 安装成功");
+    } catch (e) {
+      const msg = e.stderr?.toString() || e.message;
+      log("!", `@huggingface/transformers 安装失败（语义向量降级 BM25）: ${msg.slice(0, 120)}`);
+      log("!", `手动安装: npm install @huggingface/transformers --prefix "${OC}"`);
+    }
+  }
+  // undici：模型下载走系统代理的依赖（可选，未装则直连重试）
+  const undiciDir = path.join(OC, "node_modules", "undici");
+  if (fs.existsSync(undiciDir)) {
+    log(".", "undici 已安装，跳过");
+  } else {
+    try {
+      execSync(
+        `npm install undici --prefix "${OC}"`,
+        { stdio: "pipe", timeout: 120000 }
+      );
+      log("V", "undici 安装成功（模型下载走系统代理）");
+    } catch (e) {
+      log("!", "undici 安装失败（模型下载走直连，被墙时降级 BM25）");
+    }
+  }
+}
+
+// ============================================================
 // 主流程
 // ============================================================
 
@@ -423,6 +469,7 @@ function main() {
   copyFile(SRC.searchTs, DST.pluginsLib, "search.ts (V4 BM25 搜索引擎)");
   copyFile(SRC.engineBm25, DST.pluginsLib, "bm25.ts (知识引擎 BM25)");
   copyFile(SRC.engineCore, DST.pluginsLib, "engine.ts (知识引擎核心)");
+  copyFile(SRC.engineVector, DST.pluginsLib, "vector.ts (知识引擎语义向量)");
   copyFile(SRC.promptsLib, DST.pluginsLib, "lib/prompts.ts");
   copyFile(SRC.agentsPriority, DST.plugins, "agents-priority.ts");
   // 修正 fractal-guardian.ts 中的 import 路径：子模块部署在 lib/ 下
@@ -434,6 +481,7 @@ function main() {
     content = content.replace('"./lib/prompts.js"', '"./lib/prompts.ts"');
     content = content.replace('"./search.js"', '"./lib/search.ts"');
     content = content.replace('"./engine/engine.js"', '"./lib/engine.ts"');
+    content = content.replace('"./engine/vector.js"', '"./lib/vector.ts"');
     fs.writeFileSync(fractalDest, content, "utf-8");
 
     // 修正 search.ts 重导出路径：部署后 bm25.ts 在 lib/，非 engine/
@@ -441,6 +489,10 @@ function main() {
     let searchContent = fs.readFileSync(searchDest, "utf-8");
     searchContent = searchContent.replace('"./engine/bm25.js"', '"./bm25.ts"');
     fs.writeFileSync(searchDest, searchContent, "utf-8");
+
+    // 修正 engine.ts 内部 import：部署后 vector.ts 同在 lib/ 下，相对路径不用改
+    // （engine.ts 引用 "./vector.js"，部署后 vector.ts 与 engine.ts 同级 → 保留 ./vector.js 即可）
+    // 但 fractal-guardian.ts 引用的 vector 路径需指向 lib/vector.ts（上面已处理）
   }
   console.log("");
 
@@ -499,6 +551,7 @@ function main() {
   // [8/8] install superpowers plugin
   console.log("[8/8] installing superpowers plugin...");
   installSuperpowers();
+  installTransformers();
   console.log("");
 
   // summary
@@ -522,7 +575,9 @@ function main() {
     .replace('"./pipeline.js"', '"./lib/pipeline.ts"')
     .replace('"./dedup-checker.js"', '"./lib/dedup-checker.ts"')
     .replace('"./lib/prompts.js"', '"./lib/prompts.ts"')
-    .replace('"./search.js"', '"./lib/search.ts"');
+    .replace('"./search.js"', '"./lib/search.ts"')
+    .replace('"./engine/engine.js"', '"./lib/engine.ts"')
+    .replace('"./engine/vector.js"', '"./lib/vector.ts"');
   const dstFractal = fs.readFileSync(path.join(DST.plugins, "fractal-guardian.ts"), "utf-8");
   const srcHash = crypto.createHash("md5").update(srcFractal).digest("hex");
   const dstHash = crypto.createHash("md5").update(dstFractal).digest("hex");
