@@ -62,8 +62,8 @@ message_template:
 type 决定「这是什么」：
 | type | 含义 | 来源 |
 |------|------|------|
-| habit | 行为习惯 | LLM 自动从事件中分析发现 |
-| knowledge | 元认知/项目知识 | 用户主动要求记录的（暂存为 pending，由 agent 确认） |
+| habit | 行为习惯 | LLM 自动从事件中分析发现，初始 status=pending 待用户确认 |
+| knowledge | 元认知/项目知识 | LLM 分析发现的踩坑经验、机制结论等，直接 status=auto 自动生效 |
 
 status 决定「执行态度」：
 | status | 含义 | 何时切换 |
@@ -74,7 +74,10 @@ status 决定「执行态度」：
 
 ## 置信度判断（由你自主判定，不按固定次数）
 
-LLM 分析出新习惯后，status 一律初始为 pending，同时提供 confidence + suggested_status 供用户参考。
+LLM 分析出新条目后，根据 type 决定初始 status：
+- type=knowledge → status=auto（机制结论、踩坑经验，直接生效无需确认）
+- type=habit → status=pending（行为模式，需用户确认）
+同时提供 confidence + suggested_status 供参考。
 
 你根据**上下文综合判断**置信度，不依赖"出现了几次"这种硬数字。考虑以下维度：
 
@@ -117,11 +120,18 @@ confidence 级别：
    - 用户 A 操作后经常 B 操作（如"生成文档后手动审查"）
    - 用户反复纠正同一类错误（如"反复指出命名不规范"）
    - 用户对某些工具/命令有偏好
-2. 发现新模式 → 创建 block 文件，status=pending，type=habit，根据上文维度判断 confidence
+2. 发现新模式 → 创建 block 文件，type 和 status 根据内容性质区分：
+   - 知识类（机制、配置、踩坑经验）→ type=knowledge, status=auto
+   - 习惯类（行为模式、偏好）→ type=habit, status=pending
+   根据上文维度判断 confidence
 3. 已有模式再次确认 → 更新 confidence + confidence_reason（非单纯计数，注意时间密度和跨上下文变化）
 4. confidence 升级 → 同时创建/更新 trigger 文件，status=pending
 5. 没有新发现 → 返回 "NO_NEW_HABITS"
-6. 不确定是不是习惯 → 宁可不记，不瞎猜
+6. **新习惯与已有习惯语义相似 → 必须返回 type="skip"**（V3.5 创建层去重）。判断标准：
+   - 两个习惯描述的**核心行为**本质相同——即使措辞不同、上下文不同，讲的是同一件事
+   - 如果相似但有新信息（更高置信度、新触发条件），应 update 而非 skip 或 create
+   - 如果发现的行为确实是新的（与任何已有习惯不同），允许 create
+7. 不确定是不是习惯 → 宁可不记，不瞎猜
 
 ## 输出格式
 
@@ -178,6 +188,16 @@ memPath 必须是 0、1 或 2，按以下规则选择：
 - path[0]（全局）: ${memoryPaths[0]}
 - path[1]（个人项目级）: ${memoryPaths[1] || "（未传入项目目录）"}
 - path[2]（共享项目级）: ${memoryPaths[2] || "（未传入或不存在）"}
+
+## 去重约束（V3.5）
+
+如果分析发现的事件与已有习惯**本质相同**（仅措辞不同），必须返回 type="skip" 而不是 create_block。
+判断标准：两个习惯描述的**核心行为**相同——即使表述不同、上下文不同，讲的是同一件事。
+
+反例：
+❌ 已有「用户偏好用 ApexCharts」，你又创建「用户的图表库偏好」→ skip
+❌ 已有「scss 写完之后审查」，你又创建「用户会手动审查 scss」→ skip
+✅ 已有「提交前跑 eslint」，发现「提交前跑 stylelint」→ create（不同行为）
 
 请分析并返回 JSON。`;
 }

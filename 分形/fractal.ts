@@ -2276,92 +2276,9 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
         pendingWarnings = [];
       }
 
-      // === S3：动态知识索引（轻量，末尾注入，不影响 S1/S2 缓存） ===
-      // nudge turn: 注入实际列表 + V4 精准搜索 | non-nudge: 注入占位保持结构一致
-      {
-        const nudged = turnCounter % NUDGE_INTERVAL === 0;
-        const memPaths = getMemoryPaths(projectDir);
-        const { blocks: kb } = getBlocksCached(memPaths as unknown as Record<string, unknown>);
-        const knowledge = kb.filter((b: any) => b.type === "knowledge" && b.status !== "pending");
-
-        // V4：将缓存的 blocks 喂入知识引擎 → BM25 搜索
-        try {
-          const engineBlocks = knowledge.map((k: any) => ({
-            fileName: k.fileName || "",
-            relPath: k.fileName || "",
-            status: k.status || "",
-            type: k.type || "",
-            label: k.label || k.fileName || "?",
-            description: k.description || "",
-            priority: k.priority || 0,
-            body: (k.value || "").slice(0, 200), // 正文首 200 字
-          }));
-          v4knowledgeEngine.feedBlocks(engineBlocks);
-          // V4 P2：挂载语义向量索引（幂等，模型未加载时 vectorReady=false 走 BM25）
-          v4knowledgeEngine.setVectorIndex(v4VectorIndex);
-
-          // V4 P2：懒加载语义向量模型 + 重建向量索引（异步预热，不阻塞 S3）
-          // 模型文件缓存到 memories/models/ 下（env.cacheDir）
-          const vi = v4VectorIndex!; // 模块级初始化已保证非 null
-          if (!v4knowledgeEngine.vectorReady) {
-            vi.ensureModel()
-              .then(ok => {
-                // ok=false（模型加载失败）→ 静默降级 BM25（vector.ts 已 console.error 留痕）
-                if (!ok) return;
-                const vdocs = engineBlocks
-                  .filter(b => b.description)
-                  .map(b => ({
-                    filePath: b.fileName,
-                    text: `${b.label} ${b.description} ${b.body}`.slice(0, 500),
-                  }));
-                return vi.rebuild(vdocs);
-              })
-              .then(() => {
-                if (vi.ready) {
-                  debug(`[V4] 语义向量就绪：${vi.size} 文档已索引（${vi.dim} 维）`);
-                  _fractalDebug(`[S3] 语义向量就绪：${vi.size} 文档已索引`);
-                }
-              })
-              .catch(e => {
-                // rebuild 失败（embedding 异常）→ 降级 BM25，debug 日志留痕
-                debug(`[V4] 语义向量重建失败，降级纯 BM25: ${String(e)}`);
-              });
-          }
-        } catch {
-          // 索引构建失败不影响 S3 注入，静默降级
-        }
-
-        if (nudged && knowledge.length > 0) {
-          // V4：BM25 + 语义向量融合搜索 top-5（基于上轮用户消息）
-          const query = (lastUserMessage || "").trim();
-          _fractalDebug(`[S3] nudge turn, query="${query}", engine stats: ${v4knowledgeEngine.stats().indexed} indexed / ${v4knowledgeEngine.stats().totalBlocks} total, vectorReady=${v4knowledgeEngine.stats().vectorReady}`);
-          if (query.length >= 2) {
-            try {
-              const results = await v4knowledgeEngine.searchHybrid(query, 5);
-              _fractalDebug(`[S3] hybrid search results: ${results.length}, top: ${results.slice(0, 3).map(r => r.doc.label).join(", ")}`);
-              if (results.length > 0) {
-                const searchLines = results.map(r =>
-                  `- 🎯 **${r.doc.label}** → ${r.doc.description.slice(0, 50)}`
-                );
-                output.system.push(`\n### 🎯 精准匹配\n${searchLines.join("\n")}\n`);
-              }
-            } catch {
-              // 搜索失败静默降级，不阻断 S3 注入
-            }
-          }
-
-          // 原有：简明索引列表（前 5 条）
-          const lines: string[] = [];
-          const maxShow = 5;
-          for (const k of knowledge.slice(0, maxShow)) {
-            const label = (k as any).label || (k as any).fileName || "?";
-            const desc = ((k as any).description || "").slice(0, 55);
-            lines.push(`- **${label}**${desc ? " → " + desc : ""}`);
-          }
-          const suffix = knowledge.length > maxShow ? `\n*共 ${knowledge.length} 条，展示 ${maxShow}*` : "";
-          output.system.push(`\n### 参考知识\n${lines.join("\n")}${suffix}\n`);
-        }
-      }
+      // === S3：动态知识索引已迁移至 chat.message 钩子（V3.8.2 回归修复，2026-08-03） ===
+      // 原 S3 段位于本函数 return 之后的 dead code 区，从未执行，导致 feedBlocks/searchHybrid/参考知识注入
+      // 全部断供。完整实现见 chat.message 的 dynamicSections 逻辑（搜索 "S3 知识索引" 定位）。
 
       // V3.8.1 诊断：记录完整 system prompt 结构（发给 LLM 前）
       {
@@ -2532,6 +2449,86 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
         pendingWarnings = [];
       }
 
+
+      // ---- S3：知识索引注入（V3.8.2 回归修复 2026-08-03：从 system.transform dead code 迁移）----
+      // 每轮 feedBlocks 保持索引新鲜；nudge 轮（% NUDGE_INTERVAL）才做精准搜索，节流防污染
+      try {
+        const memPaths = getMemoryPaths(projectDir);
+        const { blocks: kb } = getBlocksCached(memPaths as unknown as Record<string, unknown>);
+        const knowledge = kb.filter((b: any) => b.type === "knowledge" && b.status !== "pending");
+
+        // 将缓存的 blocks 喂入知识引擎 → BM25 搜索（与 fractal 缓存同源，避免重复 IO）
+        const engineBlocks = knowledge.map((k: any) => ({
+          fileName: k.fileName || "",
+          relPath: k.fileName || "",
+          status: k.status || "",
+          type: k.type || "",
+          label: k.label || k.fileName || "?",
+          description: k.description || "",
+          priority: k.priority || 0,
+          body: (k.value || "").slice(0, 200), // 正文截取 200 字
+        }));
+        v4knowledgeEngine.feedBlocks(engineBlocks);
+        // V4 P2：挂载语义向量索引（幂等，模型未加载时 vectorReady=false → 纯 BM25）
+        v4knowledgeEngine.setVectorIndex(v4VectorIndex);
+
+        // V4 P2：懒加载语义向量模型 + 重建向量索引（异步预热，不阻塞注入）
+        const vi = v4VectorIndex!; // 模块级初始化已保证非 null
+        if (!v4knowledgeEngine.vectorReady) {
+          vi.ensureModel()
+            .then(ok => {
+              // ok=false（模型加载失败）→ 静默降级 BM25（vector.ts 已 console.error 留痕）
+              if (!ok) return;
+              const vdocs = engineBlocks
+                .filter(b => b.description)
+                .map(b => ({
+                  filePath: b.fileName,
+                  text: `${b.label} ${b.description} ${b.body}`.slice(0, 500),
+                }));
+              return vi.rebuild(vdocs);
+            })
+            .then(() => {
+              if (vi.ready) {
+                debug(`[V4] 语义向量就绪：${vi.size} 文档已索引（${vi.dim} 维）`);
+                _fractalDebug(`[S3] 语义向量就绪：${vi.size} 文档已索引`);
+              }
+            })
+            .catch(e => {
+              // rebuild 失败（embedding 异常）→ 降级 BM25，debug 日志留痕
+              debug(`[V4] 语义向量重建失败，降级纯 BM25: ${String(e)}`);
+            });
+        }
+
+        if (turnCounter % NUDGE_INTERVAL === 0 && knowledge.length > 0) {
+          // nudge 轮：BM25 + 语义向量融合搜索 top-5（基于当前用户消息）
+          const query = (lastUserMessage || "").trim();
+          _fractalDebug(`[S3] nudge turn, query="${query}", engine stats: ${v4knowledgeEngine.stats().indexed} indexed / ${v4knowledgeEngine.stats().totalBlocks} total, vectorReady=${v4knowledgeEngine.stats().vectorReady}`);
+          if (query.length >= 2) {
+            const results = await v4knowledgeEngine.searchHybrid(query, 5);
+            _fractalDebug(`[S3] hybrid search results: ${results.length}, top: ${results.slice(0, 3).map(r => r.doc.label).join(", ")}`);
+            if (results.length > 0) {
+              const searchLines = results.map(r =>
+                `- 🎯 **${r.doc.label}** — ${r.doc.description.slice(0, 50)}`
+              );
+              dynamicSections.push(`### 🎯 精准匹配\n${searchLines.join("\n")}`);
+            }
+          }
+
+          // 简明索引列表（展示 5 条），与精准匹配一起注入
+          const lines: string[] = [];
+          const maxShow = 5;
+          for (const k of knowledge.slice(0, maxShow)) {
+            const label = (k as any).label || (k as any).fileName || "?";
+            const desc = ((k as any).description || "").slice(0, 55);
+            lines.push(`- **${label}**${desc ? " — " + desc : ""}`);
+          }
+          const suffix = knowledge.length > maxShow ? `\n*共 ${knowledge.length} 条，展示 ${maxShow}*` : "";
+          dynamicSections.push(`### 参考知识\n${lines.join("\n")}${suffix}`);
+        }
+      } catch (e) {
+        // 索引构建/搜索失败不影响注入，静默降级（debug 留痕便于排查）
+        debug(`S3 知识索引注入失败: ${String(e)}`);
+      }
       // 注入：将 dynamic content 注入 output.context（对 AI 可见，不污染用户消息显示）
       // 此前直接修改 part.text 导致"### 参考知识"等出现在用户消息中
       if (dynamicSections.length > 0) {

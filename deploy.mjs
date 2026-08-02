@@ -27,6 +27,7 @@ const SRC = {
   fractalAgent: path.join(__dirname, "分形", "agents"),
   commands: path.join(__dirname, "双星系统", "commands"),
   fractalTs: path.join(__dirname, "分形", "fractal.ts"),
+  fractalBundle: path.join(__dirname, "分形", "dist", "fractal-guardian.js"),
   pipelineTs: path.join(__dirname, "分形", "pipeline.ts"),
   dedupTs: path.join(__dirname, "分形", "dedup-checker.ts"),
   searchTs: path.join(__dirname, "分形", "search.ts"),
@@ -159,6 +160,42 @@ function copyFile(src, destDir, label, destName) {
   } catch (e) {
     log("x", `${label || src} — ${e.message}`);
     stats.failed.push(label || src);
+  }
+}
+
+/**
+ * 用 esbuild 把 fractal.ts bundle 成单文件 js（external 掉运行时依赖）。
+ * 为什么必须 bundle：OC 桌面版加载 file:/// 的 .ts 插件时用 esbuild 打包，
+ * 而 vector.ts → @huggingface/transformers → onnxruntime-node（.node 原生文件）
+ * 无 esbuild loader → 插件静默加载失败。bundle 成 .js 后 .node 依赖
+ * 在运行时才从 OC node_modules 动态 import（deploy 的 installTransformers 已安装）。
+ */
+function bundleFractal() {
+  const entry = SRC.fractalTs;
+  const outfile = SRC.fractalBundle;
+  const external = ["@huggingface/transformers", "undici", "onnxruntime-node"];
+  try {
+    ensureDir(path.dirname(outfile));
+    // 用 esbuild 命令行（避免 deploy.mjs 静态 import esbuild 增加依赖）
+    const args = [
+      entry,
+      "--bundle",
+      "--platform=node",
+      "--format=esm",
+      "--target=node20",
+      "--outfile=" + outfile,
+      ...external.map(e => `--external:${e}`),
+      "--log-level=warning",
+    ];
+    execSync(`node "${path.join(__dirname, "node_modules", "esbuild", "bin", "esbuild")}" ${args.join(" ")}`, {
+      stdio: ["ignore", "pipe", "pipe"],
+      encoding: "utf-8",
+    });
+    stats.deployed.push("fractal-guardian.js (bundle)");
+    log("V", `fractal.ts → fractal-guardian.js (${fs.statSync(outfile).size} bytes, external: ${external.join(", ")})`);
+  } catch (e) {
+    log("x", `bundle 失败: ${e.message}`);
+    stats.failed.push("fractal-guardian.js (bundle)");
   }
 }
 
@@ -463,7 +500,10 @@ function main() {
   console.log("[3/7] deploying plugins...");
   // 清理旧文件名（OC 缓存导致旧文件不被重新发现）
   cleanupStale(path.join(DST.plugins, "fractal.ts"), "fractal.ts (已迁移到 fractal-guardian.ts)");
-  copyFile(SRC.fractalTs, DST.plugins, "fractal-guardian.ts (Guardian Agent)", "fractal-guardian.ts");
+  // fractal-guardian 必须以 bundle js 形式部署：源码 TS 含 vector.ts → transformers → onnxruntime(.node)，
+  // OC 桌面版 esbuild 加载 TS 插件时无 .node loader 会静默失败（8/2 引入 vector 后 fractal 从未加载）
+  bundleFractal(); // 生成 dist/fractal-guardian.js（external transformers/undici/onnxruntime-node）
+  copyFile(SRC.fractalBundle, DST.plugins, "fractal-guardian.js (Guardian Agent bundle)");
   copyFile(SRC.pipelineTs, DST.pluginsLib, "pipeline.ts (流水线引擎)");
   copyFile(SRC.dedupTs, DST.pluginsLib, "dedup-checker.ts (去重审查)");
   copyFile(SRC.searchTs, DST.pluginsLib, "search.ts (V4 BM25 搜索引擎)");
@@ -472,27 +512,12 @@ function main() {
   copyFile(SRC.engineVector, DST.pluginsLib, "vector.ts (知识引擎语义向量)");
   copyFile(SRC.promptsLib, DST.pluginsLib, "lib/prompts.ts");
   copyFile(SRC.agentsPriority, DST.plugins, "agents-priority.ts");
-  // 修正 fractal-guardian.ts 中的 import 路径：子模块部署在 lib/ 下
+  // 修正 search.ts 重导出路径：部署后 bm25.ts 在 lib/，非 engine/
   {
-    const fractalDest = path.join(DST.plugins, "fractal-guardian.ts");
-    let content = fs.readFileSync(fractalDest, "utf-8");
-    content = content.replace('"./pipeline.js"', '"./lib/pipeline.ts"');
-    content = content.replace('"./dedup-checker.js"', '"./lib/dedup-checker.ts"');
-    content = content.replace('"./lib/prompts.js"', '"./lib/prompts.ts"');
-    content = content.replace('"./search.js"', '"./lib/search.ts"');
-    content = content.replace('"./engine/engine.js"', '"./lib/engine.ts"');
-    content = content.replace('"./engine/vector.js"', '"./lib/vector.ts"');
-    fs.writeFileSync(fractalDest, content, "utf-8");
-
-    // 修正 search.ts 重导出路径：部署后 bm25.ts 在 lib/，非 engine/
     const searchDest = path.join(DST.pluginsLib, "search.ts");
     let searchContent = fs.readFileSync(searchDest, "utf-8");
     searchContent = searchContent.replace('"./engine/bm25.js"', '"./bm25.ts"');
     fs.writeFileSync(searchDest, searchContent, "utf-8");
-
-    // 修正 engine.ts 内部 import：部署后 vector.ts 同在 lib/ 下，相对路径不用改
-    // （engine.ts 引用 "./vector.js"，部署后 vector.ts 与 engine.ts 同级 → 保留 ./vector.js 即可）
-    // 但 fractal-guardian.ts 引用的 vector 路径需指向 lib/vector.ts（上面已处理）
   }
   console.log("");
 
@@ -569,45 +594,35 @@ function main() {
   console.log("\n[9/9] post-deploy verification...");
   const verifications = [];
 
-  // 验证 1：fractal-guardian.ts MD5 与源码一致
-  const srcFractal = fs.readFileSync(SRC.fractalTs, "utf-8")
-    // 源码中的 import 路径与部署后不同——对比时对源码做同样替换
-    .replace('"./pipeline.js"', '"./lib/pipeline.ts"')
-    .replace('"./dedup-checker.js"', '"./lib/dedup-checker.ts"')
-    .replace('"./lib/prompts.js"', '"./lib/prompts.ts"')
-    .replace('"./search.js"', '"./lib/search.ts"')
-    .replace('"./engine/engine.js"', '"./lib/engine.ts"')
-    .replace('"./engine/vector.js"', '"./lib/vector.ts"');
-  const dstFractal = fs.readFileSync(path.join(DST.plugins, "fractal-guardian.ts"), "utf-8");
-  const srcHash = crypto.createHash("md5").update(srcFractal).digest("hex");
-  const dstHash = crypto.createHash("md5").update(dstFractal).digest("hex");
-  const md5Ok = srcHash === dstHash;
-  verifications.push({ label: "fractal-guardian.ts MD5", pass: md5Ok });
-  if (md5Ok) log("V", "fractal-guardian.ts MD5 一致");
-  else log("x", `fractal-guardian.ts MD5 不一致 (源码: ${srcHash.slice(0,8)}, 部署: ${dstHash.slice(0,8)})`);
-
-  // 验证 2：import 依赖文件存在
-  const importCheck = (() => {
-    const content = dstFractal;
-    const matches = content.matchAll(/from\s+"(\.\/[^"]+)"/g);
-    let allExist = true;
-    for (const m of matches) {
-      const importPath = path.join(path.dirname(path.join(DST.plugins, "fractal-guardian.ts")), m[1]);
-      if (!fs.existsSync(importPath)) {
-        log("x", `import 依赖缺失: ${m[1]} (${importPath})`);
-        allExist = false;
-      }
-    }
-    return allExist;
+  // 验证 1：fractal-guardian.js bundle 与本地产物一致
+  const bundleSrc = path.join(SRC.fractalBundle);
+  const bundleDst = path.join(DST.plugins, "fractal-guardian.js");
+  const bundleMd5Ok = (() => {
+    if (!fs.existsSync(bundleSrc) || !fs.existsSync(bundleDst)) return false;
+    const srcHash = crypto.createHash("md5").update(fs.readFileSync(bundleSrc)).digest("hex");
+    const dstHash = crypto.createHash("md5").update(fs.readFileSync(bundleDst)).digest("hex");
+    return srcHash === dstHash;
   })();
-  verifications.push({ label: "import 依赖完整", pass: importCheck });
-  if (importCheck) log("V", "import 依赖完整");
-  else log("x", "import 依赖缺失——分形将无法加载");
+  verifications.push({ label: "fractal-guardian.js MD5", pass: bundleMd5Ok });
+  if (bundleMd5Ok) log("V", "fractal-guardian.js MD5 一致");
+  else log("x", "fractal-guardian.js MD5 不一致——bundle 未更新或部署失败");
+
+  // 验证 2：bundle 无 .node 残留（有则 OC esbuild 加载会失败）
+  const noNodeCheck = (() => {
+    if (!fs.existsSync(bundleDst)) return false;
+    const content = fs.readFileSync(bundleDst, "utf-8");
+    const hasNodeRef = /\.node["']/.test(content);
+    if (hasNodeRef) log("x", "bundle 含 .node 引用——OC 加载将失败（需 external onnxruntime-node）");
+    return !hasNodeRef;
+  })();
+  verifications.push({ label: "bundle 无 .node 残留", pass: noNodeCheck });
+  if (noNodeCheck) log("V", "bundle 无 .node 残留（external 生效）");
+  else log("x", "bundle 含 .node 残留——external 配置可能缺失");
 
   // 验证 3：plugins 目录结构
   const dirCheck = (() => {
     const required = [
-      { file: "fractal-guardian.ts", label: "fractal-guardian.ts" },
+      { file: "fractal-guardian.js", label: "fractal-guardian.js" },
       { file: "agents-priority.ts", label: "agents-priority.ts" },
       { file: "lib/pipeline.ts", label: "lib/pipeline.ts" },
       { file: "lib/prompts.ts", label: "lib/prompts.ts" },
@@ -642,7 +657,7 @@ function main() {
   console.log("");
   console.log("2. plugin 数组（桌面端 1.18.x 不支持自动发现，必须 file:/// 显式列出）:");
   console.log('   ["superpowers", "opencode-acp@latest",');
-  console.log('    "file:///C:/Users/.../plugins/fractal-guardian.ts",');
+  console.log('    "file:///C:/Users/.../plugins/fractal-guardian.js",');
   console.log('    "file:///C:/Users/.../plugins/agents-priority.ts"]');
   console.log("");
   console.log("3. 安装 opencode-acp（自适应上下文压缩）:");

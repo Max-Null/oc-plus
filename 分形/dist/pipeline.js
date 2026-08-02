@@ -1,0 +1,485 @@
+/**
+ * OC-plus 流水线 — 阶段编排引擎 V1
+ *
+ * 在行为前门释放后自动串连对齐→设计→计划→编码→交付五个阶段。
+ * 提供纯逻辑函数供 fractal.ts 调用，所有状态持久化到 .pipeline-state.json。
+ *
+ * 阶段流转：
+ *   IDLE → ALIGNING（行为前门）→ DESIGNING → PLANNING → IMPLEMENTING → DELIVERING → IDLE
+ *
+ * 不允许跳过任何阶段。complexity 仅影响文档深度（simple = 要点，complex = 完整模板）。
+ */
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
+// ============================================================
+// 路径常量
+// ============================================================
+const HOME = os.homedir();
+const OC_CONFIG = path.join(HOME, ".config", "opencode");
+const MEMORIES_DIR = path.join(OC_CONFIG, "memories");
+const PIPELINE_STATE_FILE = path.join(MEMORIES_DIR, ".pipeline-state.json");
+// ============================================================
+// Section 标记常量（Agent 输出格式规范）
+// ============================================================
+const LLM_SECTION_START = "<!-- LLM_SECTION_START -->";
+const LLM_SECTION_END = "<!-- LLM_SECTION_END -->";
+const HUMAN_SECTION_START = "<!-- HUMAN_SECTION_START -->";
+const HUMAN_SECTION_END = "<!-- HUMAN_SECTION_END -->";
+/** 阶段完成信号关键字 */
+const DESIGN_DONE_RE = /### 设计完成/;
+/** 根据任务类型返回 implementing 阶段的完成信号正则 */
+function getImplementDoneRE(taskType) {
+    switch (taskType) {
+        case "document": return /### 文档完成/;
+        case "ppt": return /### PPT完成/;
+        case "data": return /### 分析完成/;
+        default: return /### 编码完成/;
+    }
+}
+/** 门释放确认关键字（与 fractal.ts isAlignmentConfirmation 保持一致） */
+const GATE_RELEASE_RE = /设计对齐/;
+// ============================================================
+// 阶段顺序
+// ============================================================
+const STAGE_ORDER = [
+    "idle",
+    "aligning",
+    "designing",
+    "planning",
+    "implementing",
+    "delivering",
+];
+// ============================================================
+// 复杂度判断（纯逻辑，不调 LLM）
+// ============================================================
+/**
+ * 根据对齐上下文判断任务复杂度。
+ * 所有任务都走完整 5 阶段，complexity 仅影响文档深度。
+ */
+export function assessComplexity(ctx) {
+    // 已有功能迭代、跨模块、新模块、≥3 文件 → 复杂
+    if (ctx.isExisting || ctx.isCrossModule || ctx.isNewModule || ctx.estimatedFiles >= 3) {
+        return "complex";
+    }
+    return "simple";
+}
+// ============================================================
+// AlignmentContext 提取（从 Agent 门释放消息中解析 JSON）
+// ============================================================
+/**
+ * 从 assistant 消息中提取 AlignmentContext。
+ * 匹配「设计对齐」关键字后的 JSON 块。
+ * 解析失败返回 null——不阻断流水线，用默认值。
+ */
+export function extractAlignmentContext(message) {
+    // 宽松匹配：设计对齐 + 后续 ```json 块
+    const match = message.match(/设计对齐[\s\S]*?```json\s*([\s\S]*?)\s*```/);
+    if (!match)
+        return null;
+    try {
+        const parsed = JSON.parse(match[1]);
+        return {
+            feature: String(parsed.feature || "未知功能"),
+            taskType: validateTaskType(parsed.taskType),
+            isExisting: Boolean(parsed.isExisting),
+            estimatedFiles: Number(parsed.estimatedFiles) || 1,
+            isNewModule: Boolean(parsed.isNewModule),
+            isCrossModule: Boolean(parsed.isCrossModule),
+        };
+    }
+    catch {
+        // JSON 解析失败——静默降级
+        return null;
+    }
+}
+function validateTaskType(raw) {
+    const valid = ["web-app", "plugin", "document", "ppt", "data"];
+    const s = String(raw || "web-app");
+    return valid.includes(s) ? s : "web-app";
+}
+// ============================================================
+// 对齐共识 Section 切割
+// ============================================================
+/**
+ * 从 Agent 门释放消息中切割 LLM 版和人类版对齐共识。
+ * 降级策略：LLM 版标记缺失时，从人类版首段提取作为兜底。
+ */
+export function splitAlignmentOutput(message) {
+    const llmMatch = extractSection(message, LLM_SECTION_START, LLM_SECTION_END);
+    const humanMatch = extractSection(message, HUMAN_SECTION_START, HUMAN_SECTION_END);
+    // 两个 Section 都没有 → 不是对齐输出
+    if (!llmMatch && !humanMatch)
+        return null;
+    let llmContent = llmMatch;
+    let degraded = false;
+    // 降级：LLM 版缺失但人类版存在 → 从人类版提取首段 bullets 作为 LLM 版兜底
+    if (!llmContent && humanMatch) {
+        llmContent = extractFirstBullets(humanMatch);
+        degraded = true;
+    }
+    return {
+        llm: llmContent,
+        human: humanMatch,
+        degraded,
+    };
+}
+/** 从消息中提取被 start/end 标记包裹的内容 */
+function extractSection(message, startMarker, endMarker) {
+    const startIdx = message.indexOf(startMarker);
+    if (startIdx === -1)
+        return null;
+    const contentStart = startIdx + startMarker.length;
+    const endIdx = message.indexOf(endMarker, contentStart);
+    if (endIdx === -1)
+        return null;
+    return message.slice(contentStart, endIdx).trim();
+}
+/** 降级策略：从人类版文本中提取每行以 "- " 开头的首段内容 */
+function extractFirstBullets(humanContent) {
+    const lines = humanContent.split("\n");
+    const bullets = [];
+    let inBulletSection = false;
+    for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith("- ") || trimmed.startsWith("* ")) {
+            inBulletSection = true;
+            bullets.push(trimmed);
+        }
+        else if (inBulletSection && trimmed.length > 0 && !trimmed.startsWith("#")) {
+            // 延续行（多行 bullet）
+            bullets[bullets.length - 1] += " " + trimmed;
+        }
+        else if (inBulletSection && trimmed.length === 0) {
+            break; // 空行结束 bullet 段
+        }
+    }
+    return bullets.length > 0
+        ? bullets.join("\n")
+        : humanContent.slice(0, 500); // 无 bullet 时取前 500 字符兜底
+}
+// ============================================================
+// 阶段完成信号检测
+// ============================================================
+/** 检测 Agent 是否输出了「设计完成」信号 */
+export function checkDesignDoneSignal(message) {
+    return DESIGN_DONE_RE.test(message);
+}
+/** 检测 Agent 是否输出了 implementing 完成信号（根据任务类型匹配） */
+export function checkImplementDoneSignal(message, taskType) {
+    return getImplementDoneRE(taskType).test(message);
+}
+/** 检测门释放信号（对齐完成，Agent 输出「设计对齐」） */
+export function checkGateReleaseSignal(message) {
+    return GATE_RELEASE_RE.test(message);
+}
+// ============================================================
+// 流水线状态文件操作
+// ============================================================
+/** 读取流水线状态，文件不存在或损坏返回 null */
+export function readPipelineState() {
+    try {
+        if (!fs.existsSync(PIPELINE_STATE_FILE))
+            return null;
+        const raw = fs.readFileSync(PIPELINE_STATE_FILE, "utf-8");
+        const parsed = JSON.parse(raw);
+        // 基础校验：必须包含关键字段
+        if (!parsed.pipelineId || !parsed.currentStage || !parsed.stages)
+            return null;
+        return parsed;
+    }
+    catch {
+        // 文件损坏或权限问题——静默降级
+        return null;
+    }
+}
+/** 写入流水线状态（覆盖） */
+export function writePipelineState(state) {
+    try {
+        const dir = path.dirname(PIPELINE_STATE_FILE);
+        if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true });
+        }
+        state.updatedAt = new Date().toISOString();
+        fs.writeFileSync(PIPELINE_STATE_FILE, JSON.stringify(state, null, 2), "utf-8");
+    }
+    catch {
+        // 写入失败静默——流水线可降级为无状态模式
+    }
+}
+/** 清空流水线状态（任务取消或完成后清理） */
+export function clearPipelineState() {
+    try {
+        if (fs.existsSync(PIPELINE_STATE_FILE)) {
+            fs.unlinkSync(PIPELINE_STATE_FILE);
+        }
+    }
+    catch {
+        // 静默
+    }
+}
+// ============================================================
+// 流水线创建与阶段流转
+// ============================================================
+/** 生成流水线 ID */
+function generatePipelineId(feature) {
+    const now = new Date();
+    const date = now.toISOString().slice(0, 10).replace(/-/g, "");
+    const time = now.toTimeString().slice(0, 5).replace(":", "");
+    // 功能名取前 10 个中文字符转拼音首字母（简化：直接用中文截断）
+    const shortFeature = feature.slice(0, 15).replace(/\s+/g, "-");
+    return `${date}-${time}-${shortFeature}`;
+}
+/** 创建新的流水线状态（门释放后调用）
+ * @param ctx 对齐上下文
+ * @param flashComplexity flash 分类器结果（可选）— simple 时跳过 planning，直接 implementing
+ */
+export function createPipelineState(ctx, flashComplexity) {
+    const complexity = flashComplexity === "simple" ? "simple" : assessComplexity(ctx);
+    const pipelineId = generatePipelineId(ctx.feature);
+    // flash 判断为 simple → 跳过 planning → 直接 implementing
+    const initialStage = flashComplexity === "simple" ? "implementing" : "designing";
+    const stages = {
+        aligning: { status: "completed", completedAt: new Date().toISOString() },
+        designing: initialStage === "implementing" ? { status: "skipped", completedAt: new Date().toISOString() } : { status: "active", startedAt: new Date().toISOString() },
+        planning: initialStage === "implementing" ? { status: "skipped", completedAt: new Date().toISOString() } : { status: "pending" },
+        implementing: { status: initialStage === "implementing" ? "active" : "pending", ...(initialStage === "implementing" ? { startedAt: new Date().toISOString() } : {}) },
+        delivering: { status: "pending" },
+    };
+    return {
+        pipelineId,
+        status: "active",
+        taskType: ctx.taskType,
+        route: flashComplexity === "simple" ? "direct" : "full",
+        complexity,
+        context: ctx,
+        currentStage: initialStage,
+        stages,
+        startedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+    };
+}
+/** 获取当前阶段的完成状态 */
+export function isStageComplete(state, projectDir, lastAssistantMessage) {
+    // designing 阶段需要同时检查文件存在 + Agent 信号
+    if (state.currentStage === "designing") {
+        return checkDesignStageComplete(state, projectDir, lastAssistantMessage);
+    }
+    // implementing 阶段只检查 Agent 信号
+    if (state.currentStage === "implementing") {
+        return lastAssistantMessage ? checkImplementDoneSignal(lastAssistantMessage, state.taskType) : false;
+    }
+    // planning 阶段检查 plans/ 目录下是否存在对应计划文件
+    if (state.currentStage === "planning") {
+        return checkPlanStageComplete(state);
+    }
+    // delivering 阶段检查是否有新的 git commit（由触发线 5 机制处理，此处返回 false）
+    return false;
+}
+/** 检查 DESIGNING 阶段是否完成 */
+function checkDesignStageComplete(state, projectDir, lastMsg) {
+    // 条件 1：设计文件已创建
+    const designFile = path.join(projectDir, "doc", "设计", `${state.context.feature}.md`);
+    if (!fs.existsSync(designFile))
+        return false;
+    // 条件 2：web-app 类型还需要原型文档
+    if (state.taskType === "web-app") {
+        const protoFile = path.join(projectDir, "doc", "原型", `${state.context.feature}.md`);
+        if (!fs.existsSync(protoFile))
+            return false;
+    }
+    // 条件 3：Agent 已输出「设计完成」信号（防文件创建但内容未定稿）
+    if (lastMsg && !checkDesignDoneSignal(lastMsg))
+        return false;
+    return true;
+}
+/** 检查 PLANNING 阶段是否完成 */
+function checkPlanStageComplete(state) {
+    try {
+        const plansDir = path.join(OC_CONFIG, "plans");
+        if (!fs.existsSync(plansDir))
+            return false;
+        const files = fs.readdirSync(plansDir).filter(f => f.endsWith(".md"));
+        return files.some(f => f.includes(state.context.feature));
+    }
+    catch {
+        return false;
+    }
+}
+/** 过渡到下一阶段 */
+export function transitionToNextStage(state) {
+    const currentIdx = STAGE_ORDER.indexOf(state.currentStage);
+    const nextStage = STAGE_ORDER[currentIdx + 1];
+    // 没有下一阶段 → 流水线完成
+    if (!nextStage || nextStage === "idle") {
+        // 先标记当前阶段完成，再置 completed
+        if (state.currentStage !== "idle" && state.currentStage !== "aligning") {
+            state.stages[state.currentStage].status = "completed";
+            state.stages[state.currentStage].completedAt = new Date().toISOString();
+        }
+        state.status = "completed";
+        state.currentStage = "idle";
+        state.updatedAt = new Date().toISOString();
+        writePipelineState(state);
+        return state;
+    }
+    // 完成当前阶段
+    if (state.currentStage !== "aligning") {
+        if (state.currentStage !== "idle") {
+            state.stages[state.currentStage].status = "completed";
+        }
+        // aligning 不单独记录状态（门释放即完成）
+    }
+    // 记录完成时间（对齐阶段也记录，由上面 completedAt 覆盖）
+    if (state.currentStage !== "idle") {
+        state.stages[state.currentStage].completedAt = new Date().toISOString();
+    }
+    // 激活下一阶段
+    state.currentStage = nextStage;
+    state.stages[nextStage].status = "active";
+    state.stages[nextStage].startedAt = new Date().toISOString();
+    state.updatedAt = new Date().toISOString();
+    writePipelineState(state);
+    return state;
+}
+// ============================================================
+// 阶段启动 prompt 模板
+// ============================================================
+/**
+ * 获取当前阶段的启动 prompt（注入到 chat 或 system.transform）
+ * 返回值：需要注入的文本，或 null（无需注入）
+ */
+export function getStageStartPrompt(state) {
+    const f = state.context.feature;
+    const typeLabel = getTaskTypeLabel(state.taskType);
+    switch (state.currentStage) {
+        case "designing": {
+            const isCodeTask = state.taskType === "web-app" || state.taskType === "plugin";
+            if (isCodeTask) {
+                return [
+                    `需求对齐完成。现在进入**设计阶段**（任务类型：${typeLabel}）。`,
+                    "",
+                    `请使用 \`mxy-design-doc\` skill 为「${f}」创建设计方案。`,
+                    `复杂度：${state.complexity === "simple" ? "简单（要点即可，1-2 段）" : "复杂（完整模板）"}。`,
+                    "",
+                    "完成后输出「### 设计完成」信号进入下一阶段。",
+                ].join("\n");
+            }
+            // 非编程任务：不用 skill，直接用步骤指引
+            const steps = {
+                document: "确定大纲 → 章节要点 → 边界约束 → 目标读者",
+                ppt: "确定页数 → 每页主题 → 数据来源",
+                data: "确定分析维度 → 图表类型 → 数据源",
+            };
+            const doneSignal = {
+                document: "### 设计完成",
+                ppt: "### 设计完成",
+                data: "### 设计完成",
+            };
+            const step = steps[state.taskType] || steps.document;
+            const signal = doneSignal[state.taskType] || doneSignal.document;
+            return [
+                `行为前门对齐完成。现在进入**设计阶段**（任务类型：${typeLabel}）。`,
+                "",
+                `请为「${f}」完成设计：**${step}**。`,
+                `复杂度：${state.complexity === "simple" ? "简单（要点即可）" : "复杂（完整规划）"}。`,
+                "",
+                `完成后输出「${signal}」信号进入下一阶段。`,
+            ].join("\n");
+        }
+        case "planning":
+            return [
+                `设计方案已确认。现在进入**计划阶段**。`,
+                "",
+                `请将「${f}」的设计方案拆解为具体实施任务，写入 \`~/.config/opencode/plans/\` 目录。`,
+                `每步 2-5 分钟可完成。${state.complexity === "simple" ? "3 步以内即可。" : "需要完整拆解。"}`,
+            ].join("\n");
+        case "implementing": {
+            const isCodeTask = state.taskType === "web-app" || state.taskType === "plugin";
+            if (isCodeTask) {
+                return [
+                    `计划已确认。现在开始**编码实现**「${f}」。`,
+                    "",
+                    "按计划逐步实现，触发线 1 会自动审查每次文件编辑。",
+                    "编码完成后输出「### 编码完成」信号进入审查阶段。",
+                    "",
+                    `注意：${state.complexity === "simple" ? "这是轻量功能，保持实现简洁。" : "这是复杂功能，注意边界处理和测试覆盖。"}`,
+                ].join("\n");
+            }
+            // 非编程任务：按类型给出执行指引
+            const steps = {
+                document: "按章节逐节撰写 → 插图 → 引用核实",
+                ppt: "按页逐页生成 → 数据可视化",
+                data: "写查询 → 生成图表 → 标注异常值",
+            };
+            const doneSignals = {
+                document: "### 文档完成",
+                ppt: "### PPT完成",
+                data: "### 分析完成",
+            };
+            const step = steps[state.taskType] || steps.document;
+            return [
+                `计划已确认。现在开始**执行**「${f}」。`,
+                "",
+                `执行步骤：**${step}**。`,
+                `${state.complexity === "simple" ? "保持简洁，聚焦核心产出。" : "追求完整度，注意细节。"}`,
+                "",
+                `完成后输出「${doneSignals[state.taskType]}」信号进入审查阶段。`,
+            ].join("\n");
+        }
+        case "delivering": {
+            const isCodeTask = state.taskType === "web-app" || state.taskType === "plugin";
+            if (isCodeTask) {
+                return [
+                    `编码完成。现在进入**交付审查**。`,
+                    "",
+                    "请使用 `mxy-commit-review` skill 进行最终审查并提交。",
+                    "审查通过后流水线自动完成。",
+                ].join("\n");
+            }
+            const checks = {
+                document: "格式审查：标题层级、错别字、引用链接、图片位置",
+                ppt: "视觉一致性检查：字体、颜色、图表比例",
+                data: "数据准确性校验：样本量、异常值、单位标注",
+            };
+            const check = checks[state.taskType] || checks.document;
+            return [
+                `执行完成。现在进入**交付审查**。`,
+                "",
+                `审查重点：**${check}**。`,
+                "审查通过后流水线自动完成。",
+            ].join("\n");
+        }
+        default:
+            return null;
+    }
+}
+function getTaskTypeLabel(type) {
+    const labels = {
+        "web-app": "Web 应用",
+        "plugin": "插件/工具",
+        "document": "文档",
+        "ppt": "PPT",
+        "data": "数据分析",
+    };
+    return labels[type] || "未知";
+}
+// ============================================================
+// 异常处理辅助函数
+// ============================================================
+/** 检查用户消息是否要求跳过阶段（一律拒绝） */
+export function isStageSkipRequest(message) {
+    return /跳过.*设计|跳过.*文档|跳过.*计划|算了.*不写|不写.*设计|不写.*计划|直接.*改代码|直接.*编码/.test(message);
+}
+/** 检查用户消息是否明确取消任务 */
+export function isTaskCancelRequest(message) {
+    return /取消任务|放弃.*任务|不做.*了/.test(message);
+}
+/** 生成逃课拒绝消息 */
+export function getStageSkipRejection(feature) {
+    return [
+        `流水线不可跳阶段。`,
+        `「${feature}」小功能设计文档几分钟就写完，大功能不写就是在造屎山。`,
+        "如需放弃整个任务，说「取消任务」。",
+    ].join("\n");
+}
