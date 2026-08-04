@@ -103,40 +103,82 @@ function readOcProviderConfig() {
 }
 
 /**
- * 从实际 OC 环境的 opencode.json 读取 modelAliases 配置
+ * 简易 JSONC → JSON 转换：剥离行注释（//）和块注释（/* *\/）
+ * 为什么自实现：opencode.json/opencode.json.example 带注释（JSONC），
+ * JSON.parse 直接解析会抛异常导致 modelAliases 静默失效（曾实际踩坑）。
+ * 注意：注释剥离只处理注释语法，不做引号内字符串转义检测——本项目配置文件中
+ * 注释均独立成行，不会出现在字符串字面量内，风险可接受。
+ */
+function stripJsoncComments(text) {
+  return text
+    .replace(/\/\*[\s\S]*?\*\//g, "")  // 块注释 /* ... */
+    .replace(/(^|[^:])\/\/.*$/gm, "$1"); // 行注释 // ...（避免误伤 http:// 等协议）
+}
+
+/**
+ * 从项目根目录的 opencode.json 读取 modelAliases 配置
+ * （V3.10 决策：modelAliases 是 deploy.mjs 构建期配置，写运行时 opencode.json 会导致 OC 启动报错）
+ * 只读用户真实配置 opencode.json；未配置时返回 null，由 patchAgentModel 的内置默认值兜底
+ * （opencode.json.example 仅是模板参考，不作为配置来源——模板含注释占位符，语义混乱）
  * 返回 { [alias]: "providerId:modelName" } 或 null
  */
 function readModelAliases() {
-  const ocConfigPath = path.join(OC, "opencode.json");
-  if (!fs.existsSync(ocConfigPath)) return null;
+  const cfgPath = path.join(__dirname, "opencode.json");
+  if (!fs.existsSync(cfgPath)) return null;
   try {
-    const config = JSON.parse(fs.readFileSync(ocConfigPath, "utf-8"));
+    const raw = fs.readFileSync(cfgPath, "utf-8").replace(/^\uFEFF/, "");
+    const config = JSON.parse(stripJsoncComments(raw));
     return config.modelAliases || null;
   } catch (e) {
+    // 解析失败返回 null，由内置默认值兜底（不阻断部署）
     return null;
   }
 }
 
 /**
+ * 归一化 model 引用为 OC 标准斜杠格式（如 "ds:deepseek-v4-flash" → "ds/deepseek-v4-flash"）
+ * 为什么必须：agent 部署后 model: 值会被 OC 直接使用，斜杠是 OC 标准；
+ * example 模板中的 modelAliases 用冒号格式，不归一化会导致部署产物格式漂移。
+ */
+function normalizeModelRef(modelRef) {
+  const sepIdx = Math.max(modelRef.lastIndexOf(":"), modelRef.lastIndexOf("/"));
+  if (sepIdx <= 0) return modelRef;
+  const provider = modelRef.slice(0, sepIdx);
+  const model = modelRef.slice(sepIdx + 1);
+  return `${provider}/${model}`;
+}
+
+/**
  * 替换 agent 文件中的 model: 行
- * - 优先解析 modelAliases（如 DS_MODEL_LOW → ds:deepseek-v4-flash）
- * - 别名未配置则回退到默认 provider 配置
- * - 别名都不是则用原始默认 provider
+ * - 优先解析 modelAliases（如 DS_MODEL_LOW → ds/deepseek-v4-flash）
+ * - 别名未配置则回退到内置默认值（DS_MODEL_LOW→flash、DS_MODEL_HIGH→pro）
+ * - 已经是完整 provider:model 引用 → 替换 provider/model 为实际配置
+ * - 无法解析 → 保持原始值不变（避免 model: "" 导致 OC 报 unknown provider）
  * 格式: model: "providerId/modelName"（OC 要求双引号）
  */
+// 内置默认别名映射：modelAliases 未配置时的兜底（设计文档风险表 211 行约定）
+const BUILTIN_MODEL_ALIASES = {
+  DS_MODEL_LOW: "ds/deepseek-v4-flash",
+  DS_MODEL_HIGH: "ds/deepseek-v4-pro",
+};
+
 function patchAgentModel(content, providerId, modelName, aliases) {
   // 提取当前 model 值（去掉引号和换行）
   const modelMatch = content.match(/^model:\s*"([^"]+)"/m);
   const currentModel = modelMatch ? modelMatch[1] : "";
-  let resolvedModel = currentModel;
+  let resolvedModel = "";
 
-  // 若当前 model 是已知别名 → 解析
+  // 优先级 1：显式 modelAliases 配置（用户可覆盖内置默认值，值归一化为斜杠格式）
   if (aliases && aliases[currentModel]) {
-    resolvedModel = aliases[currentModel];
-  } else if (currentModel && currentModel.includes(":")) {
-    // 已是完整 provider:model 引用 → 替换 provider/model 为实际配置
-    resolvedModel = `${providerId}/${modelName}`;
-  } else if (currentModel && currentModel.includes("/")) {
+    resolvedModel = normalizeModelRef(aliases[currentModel]);
+  }
+  // 优先级 2：内置默认别名映射（模型名可能被用户配置覆盖，故用 providerId 拼接）
+  else if (BUILTIN_MODEL_ALIASES[currentModel]) {
+    const defaultModel = BUILTIN_MODEL_ALIASES[currentModel].split("/")[1];
+    resolvedModel = `${providerId}/${defaultModel}`;
+  }
+  // 优先级 3：已是完整 provider:model 引用 → 替换 provider/model 为实际配置
+  else if (currentModel && (currentModel.includes(":") || currentModel.includes("/"))) {
     resolvedModel = `${providerId}/${modelName}`;
   }
 
@@ -462,8 +504,8 @@ function main() {
     const aliasList = Object.entries(modelAliases).map(([k, v]) => `${k}=>${v}`).join(", ");
     log(".", `modelAliases: ${aliasList}`);
   } else {
-    log("!", "modelAliases 未配置——DS_MODEL_LOW/DS_MODEL_HIGH 将不解析，agent 可能报 unknown provider");
-    log("!", "请在 opencode.json 中参照 opencode.json.example 添加 modelAliases 段");
+    log("!", "modelAliases 未配置——将使用内置默认值（DS_MODEL_LOW→flash、DS_MODEL_HIGH→pro）");
+    log("!", "自定义模型：在项目根目录 opencode.json 顶层添加 modelAliases 段（参照 opencode.json.example）");
   }
   const agentFiles = [
     { src: path.join(SRC.agents, "双星.md"), label: "double-star agent" },

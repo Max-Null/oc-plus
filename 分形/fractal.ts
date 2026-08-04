@@ -762,11 +762,15 @@ async function getApiConfig(): Promise<ApiConfig | null> {
     try {
       const raw = fs.readFileSync(configPath, "utf-8").replace(/^\uFEFF/, "");
       const config = JSON.parse(raw);
-      // 解析 provider:model 格式（如 "ds:deepseek-v4-pro"），取 provider 名和模型名
+      // 解析 provider:model 格式（如 "ds:deepseek-v4-pro" 或 "ds/deepseek-v4-pro"）
+      // OC 标准是斜杠分隔（deploy.mjs 统一输出斜杠），但 example 模板用冒号——两种都要兼容
+      // 优先按冒号切（provider 名不含冒号，模型名可能含斜杠如 org/model），找不到冒号再按斜杠切
       const fullModel = String(config.model || "");
       const colonIdx = fullModel.indexOf(":");
-      const providerName = colonIdx > 0 ? fullModel.slice(0, colonIdx) : "";
-      const currentModel = colonIdx > 0 ? fullModel.slice(colonIdx + 1) : fullModel;
+      const slashIdx = fullModel.lastIndexOf("/");
+      const sepIdx = colonIdx > 0 ? colonIdx : (slashIdx > 0 ? slashIdx : -1);
+      const providerName = sepIdx > 0 ? fullModel.slice(0, sepIdx) : "";
+      const currentModel = sepIdx > 0 ? fullModel.slice(sepIdx + 1) : fullModel;
 
       // 从 provider 配置中查找对应 provider 的 options
       const providers = config.provider as Record<string, unknown> | undefined;

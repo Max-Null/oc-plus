@@ -2,6 +2,9 @@
 node_modules/
 .slim/
 
+# 分形子项目独立依赖锁（根 package-lock.json 才是受控文件）
+分形/package-lock.json
+
 # OpenCode 运行时
 .opencode/logs/
 

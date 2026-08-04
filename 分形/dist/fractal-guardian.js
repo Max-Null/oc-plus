@@ -1795,8 +1795,10 @@ async function getApiConfig() {
       const config = JSON.parse(raw);
       const fullModel = String(config.model || "");
       const colonIdx = fullModel.indexOf(":");
-      const providerName = colonIdx > 0 ? fullModel.slice(0, colonIdx) : "";
-      const currentModel = colonIdx > 0 ? fullModel.slice(colonIdx + 1) : fullModel;
+      const slashIdx = fullModel.lastIndexOf("/");
+      const sepIdx = colonIdx > 0 ? colonIdx : slashIdx > 0 ? slashIdx : -1;
+      const providerName = sepIdx > 0 ? fullModel.slice(0, sepIdx) : "";
+      const currentModel = sepIdx > 0 ? fullModel.slice(sepIdx + 1) : fullModel;
       const providers = config.provider;
       const provider = providers?.[providerName];
       const opts = provider?.options;
