@@ -21,7 +21,7 @@
   "plugin": [
     "~/.config/opencode/node_modules/superpowers",
     "opencode-acp@latest",
-    "file:///C:/Users/你的用户名/.config/opencode/plugins/fractal-guardian.ts",
+    "file:///C:/Users/你的用户名/.config/opencode/plugins/fractal-guardian.js",
     "file:///C:/Users/你的用户名/.config/opencode/plugins/agents-priority.ts"
   ],
 

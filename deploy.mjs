@@ -542,6 +542,9 @@ function main() {
   console.log("[3/7] deploying plugins...");
   // 清理旧文件名（OC 缓存导致旧文件不被重新发现）
   cleanupStale(path.join(DST.plugins, "fractal.ts"), "fractal.ts (已迁移到 fractal-guardian.ts)");
+  // 清理旧版 .ts 部署残留——deploy 从 V3.11 起以 bundle .js 部署，
+  // 旧 .ts（7/28 中间版）残留在 plugins/ 会让 opencode.json 引用错乱（8/5 排查确认）
+  cleanupStale(path.join(DST.plugins, "fractal-guardian.ts"), "fractal-guardian.ts (已迁移到 fractal-guardian.js bundle)");
   // fractal-guardian 必须以 bundle js 形式部署：源码 TS 含 vector.ts → transformers → onnxruntime(.node)，
   // OC 桌面版 esbuild 加载 TS 插件时无 .node loader 会静默失败（8/2 引入 vector 后 fractal 从未加载）
   bundleFractal(); // 生成 dist/fractal-guardian.js（external transformers/undici/onnxruntime-node）

@@ -2228,17 +2228,9 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
 
       // 回应模式已升级为 event hook 触发（V2.0），不再硬编码写入后调助理规则
 
-      // 触发线 2 扩展：无反馈环检测 → 通过 system.transform 注入提醒（下一轮生效）
-      if (!isLinePaused("2")) {
-        const nfs = readNoFeedbackState();
-        if (nfs.consecutiveTurns >= NO_FEEDBACK_THRESHOLD) {
-          const warning = `\n## ⚠️ 分形：缺少反馈环\n连续 ${nfs.consecutiveTurns} 轮修改代码但未执行测试。按照结构化调试流程，先建立反馈环再修复（Phase 1）。在下一轮修改代码前，先跑一次相关测试建立"能变红"的反馈环。\n`;
-          output.system.push(warning);
-          debug(`触发线2扩展: system.transform 注入无反馈环警告，consecutiveTurns=${nfs.consecutiveTurns}`);
-          nfs.consecutiveTurns = 0;
-          saveNoFeedbackState(nfs);
-        }
-      }
+      // 触发线 2 扩展：无反馈环警告已迁移至 chat.message（dynamicSections 注入，2026-08-05）
+      // 与 S3 知识索引同批迁移——计数在 chat.message 的 message.updated 事件里更新，
+      // 注入也必须在同钩子内才能看到最新计数；留在 system.transform 的 return 后是 dead code
 
       // 中文思考：独立 system message，最高 recency，不受 core-rules 大块稀释
       output.system.push("\n以中文思考，除非用户要求，否则回答也使用中文。\n");
@@ -2453,6 +2445,21 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
         pendingWarnings = [];
       }
 
+      // 4. 触发线 2 扩展：无反馈环警告（V3.8.2 迁移时被留在 system.transform dead code 区，
+      //    V3.11 只修了 S3 知识索引，漏掉了这里。2026-08-05 迁移到 chat.message 与计数同处）
+      // 注意执行顺序：chat.message 钩子先于 event 钩子触发，此处读到的是上一轮的计数，
+      // 即警告比实际超标晚 1 轮——阈值 3 时第 4 轮才注入，属可接受的权衡（无需改为同步）
+      if (!isLinePaused("2")) {
+        const nfs = readNoFeedbackState();
+        if (nfs.consecutiveTurns >= NO_FEEDBACK_THRESHOLD) {
+          const warning = `\n## ⚠️ 分形：缺少反馈环\n连续 ${nfs.consecutiveTurns} 轮修改代码但未执行测试。按照结构化调试流程，先建立反馈环再修复（Phase 1）。在下一轮修改代码前，先跑一次相关测试建立"能变红"的反馈环。\n`;
+          dynamicSections.push(warning);
+          debug(`触发线2扩展: chat.message 注入无反馈环警告，consecutiveTurns=${nfs.consecutiveTurns}`);
+          nfs.consecutiveTurns = 0;
+          saveNoFeedbackState(nfs);
+        }
+      }
+
 
       // ---- S3：知识索引注入（V3.8.2 回归修复 2026-08-03：从 system.transform dead code 迁移）----
       // 每轮 feedBlocks 保持索引新鲜；nudge 轮（% NUDGE_INTERVAL）才做精准搜索，节流防污染
@@ -2585,10 +2592,13 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
 
             // 触发线 2 扩展：用户新消息 → 处理上一轮的反馈环状态
             const nfs = readNoFeedbackState();
-            // 跨会话重置
-            if (nfs.lastSessionId && nfs.lastSessionId !== (sessionID || "")) {
+            // 跨会话重置：会话变化（或首次初始化 lastSessionId 为空）时清空计数
+            // 原实现要求 lastSessionId 非空才重置 → 首次运行永远为空，计数跨会话污染
+            // sessionID 为空时跳过判断（事件偶发缺省场景不重置，避免误清计数）
+            const sid = sessionID || "";
+            if (sid && nfs.lastSessionId !== sid) {
               nfs.consecutiveTurns = 0;
-              nfs.lastSessionId = sessionID || "";
+              nfs.lastSessionId = sid;
             }
             // 上轮有 edit 但无 bash → 递增；有 bash → 重置；无 edit → 保持
             if (editsThisTurn > 0 && !bashCalledThisTurn) {

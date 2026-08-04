@@ -2927,19 +2927,6 @@ websearch \u5DE5\u5177\u5DF2\u5C31\u7EEA\u3002\u5148\u641C\u518D\u8BF4\u3002`
       output.system.push(`
 ${websearchRules}
 `);
-      if (!isLinePaused("2")) {
-        const nfs = readNoFeedbackState();
-        if (nfs.consecutiveTurns >= NO_FEEDBACK_THRESHOLD) {
-          const warning = `
-## \u26A0\uFE0F \u5206\u5F62\uFF1A\u7F3A\u5C11\u53CD\u9988\u73AF
-\u8FDE\u7EED ${nfs.consecutiveTurns} \u8F6E\u4FEE\u6539\u4EE3\u7801\u4F46\u672A\u6267\u884C\u6D4B\u8BD5\u3002\u6309\u7167\u7ED3\u6784\u5316\u8C03\u8BD5\u6D41\u7A0B\uFF0C\u5148\u5EFA\u7ACB\u53CD\u9988\u73AF\u518D\u4FEE\u590D\uFF08Phase 1\uFF09\u3002\u5728\u4E0B\u4E00\u8F6E\u4FEE\u6539\u4EE3\u7801\u524D\uFF0C\u5148\u8DD1\u4E00\u6B21\u76F8\u5173\u6D4B\u8BD5\u5EFA\u7ACB"\u80FD\u53D8\u7EA2"\u7684\u53CD\u9988\u73AF\u3002
-`;
-          output.system.push(warning);
-          debug(`\u89E6\u53D1\u7EBF2\u6269\u5C55: system.transform \u6CE8\u5165\u65E0\u53CD\u9988\u73AF\u8B66\u544A\uFF0CconsecutiveTurns=${nfs.consecutiveTurns}`);
-          nfs.consecutiveTurns = 0;
-          saveNoFeedbackState(nfs);
-        }
-      }
       output.system.push("\n\u4EE5\u4E2D\u6587\u601D\u8003\uFF0C\u9664\u975E\u7528\u6237\u8981\u6C42\uFF0C\u5426\u5219\u56DE\u7B54\u4E5F\u4F7F\u7528\u4E2D\u6587\u3002\n");
       const plans = getActivePlanSummaries();
       if (plans.length > 0) {
@@ -3082,6 +3069,19 @@ ${list}
         debug(`chat.message \u6CE8\u5165 ${pendingWarnings.length} \u6761\u8B66\u544A\uFF08${warningText.length} chars\uFF09`);
         pendingWarnings = [];
       }
+      if (!isLinePaused("2")) {
+        const nfs = readNoFeedbackState();
+        if (nfs.consecutiveTurns >= NO_FEEDBACK_THRESHOLD) {
+          const warning = `
+## \u26A0\uFE0F \u5206\u5F62\uFF1A\u7F3A\u5C11\u53CD\u9988\u73AF
+\u8FDE\u7EED ${nfs.consecutiveTurns} \u8F6E\u4FEE\u6539\u4EE3\u7801\u4F46\u672A\u6267\u884C\u6D4B\u8BD5\u3002\u6309\u7167\u7ED3\u6784\u5316\u8C03\u8BD5\u6D41\u7A0B\uFF0C\u5148\u5EFA\u7ACB\u53CD\u9988\u73AF\u518D\u4FEE\u590D\uFF08Phase 1\uFF09\u3002\u5728\u4E0B\u4E00\u8F6E\u4FEE\u6539\u4EE3\u7801\u524D\uFF0C\u5148\u8DD1\u4E00\u6B21\u76F8\u5173\u6D4B\u8BD5\u5EFA\u7ACB"\u80FD\u53D8\u7EA2"\u7684\u53CD\u9988\u73AF\u3002
+`;
+          dynamicSections.push(warning);
+          debug(`\u89E6\u53D1\u7EBF2\u6269\u5C55: chat.message \u6CE8\u5165\u65E0\u53CD\u9988\u73AF\u8B66\u544A\uFF0CconsecutiveTurns=${nfs.consecutiveTurns}`);
+          nfs.consecutiveTurns = 0;
+          saveNoFeedbackState(nfs);
+        }
+      }
       try {
         const memPaths = getMemoryPaths(projectDir);
         const { blocks: kb } = getBlocksCached(memPaths);
@@ -3180,9 +3180,10 @@ ${lines.join("\n")}${suffix}`);
               decayCounter(sessionID || "");
             }
             const nfs = readNoFeedbackState();
-            if (nfs.lastSessionId && nfs.lastSessionId !== (sessionID || "")) {
+            const sid = sessionID || "";
+            if (sid && nfs.lastSessionId !== sid) {
               nfs.consecutiveTurns = 0;
-              nfs.lastSessionId = sessionID || "";
+              nfs.lastSessionId = sid;
             }
             if (editsThisTurn > 0 && !bashCalledThisTurn) {
               nfs.consecutiveTurns++;

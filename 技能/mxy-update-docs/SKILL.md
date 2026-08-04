@@ -1,6 +1,10 @@
 ---
 name: mxy-update-docs
-description: 根据项目实际情况更新 AGENTS.md，再根据 AGENTS.md 同步更新 README.md，保持项目文档同步
+description: >
+  根据项目实际情况更新 AGENTS.md，再根据 AGENTS.md 同步更新 README.md，保持项目文档同步。
+  当用户提到"更新文档""同步文档""更新 AGENTS.md""更新 README""补文档""文档过时"时使用。
+  不适用于新建项目的文档初始化（无 AGENTS.md 时先用 doc-coauthoring/ brainstorming 确定内容），
+  也不适用于功能设计方案（用 mxy-design-doc）和 PPT/Word 等办公文档（用 pptx/docx）。
 ---
 
 请严格执行以下步骤，不得跳过任何一步：
