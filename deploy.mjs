@@ -35,6 +35,7 @@ const SRC = {
   engineCore: path.join(__dirname, "分形", "engine", "engine.ts"),
   engineVector: path.join(__dirname, "分形", "engine", "vector.ts"),
   promptsLib: path.join(__dirname, "分形", "lib", "prompts.ts"),
+  noFeedbackLib: path.join(__dirname, "分形", "lib", "no-feedback.ts"),
   scripts: path.join(__dirname, "分形", "scripts"),
   promptTemplates: path.join(__dirname, "分形", "prompts"),
   agentsPriority: path.join(__dirname, "agents-priority.ts"),
@@ -556,6 +557,7 @@ function main() {
   copyFile(SRC.engineCore, DST.pluginsLib, "engine.ts (知识引擎核心)");
   copyFile(SRC.engineVector, DST.pluginsLib, "vector.ts (知识引擎语义向量)");
   copyFile(SRC.promptsLib, DST.pluginsLib, "lib/prompts.ts");
+  copyFile(SRC.noFeedbackLib, DST.pluginsLib, "lib/no-feedback.ts");
   copyFile(SRC.agentsPriority, DST.plugins, "agents-priority.ts");
   // 修正 search.ts 重导出路径：部署后 bm25.ts 在 lib/，非 engine/
   {
@@ -671,6 +673,7 @@ function main() {
       { file: "agents-priority.ts", label: "agents-priority.ts" },
       { file: "lib/pipeline.ts", label: "lib/pipeline.ts" },
       { file: "lib/prompts.ts", label: "lib/prompts.ts" },
+      { file: "lib/no-feedback.ts", label: "lib/no-feedback.ts" },
     ];
     let allGood = true;
     for (const r of required) {

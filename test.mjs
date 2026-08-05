@@ -13,7 +13,7 @@ import os from "node:os";
 import path from "node:path";
 
 // 测试文件清单（新增测试文件时在此追加）
-const TEST_FILES = ["分形/engine/test.ts", "分形/engine/vector.test.ts", "分形/search.test.ts"];
+const TEST_FILES = ["分形/engine/test.ts", "分形/engine/vector.test.ts", "分形/search.test.ts", "分形/no-feedback.test.ts"];
 
 const outDir = fs.mkdtempSync(path.join(os.tmpdir(), "oc-plus-test-"));
 

@@ -1,5 +1,5 @@
 // 分形/fractal.ts
-import fs4 from "node:fs";
+import fs5 from "node:fs";
 import path4 from "node:path";
 import os3 from "node:os";
 import crypto from "node:crypto";
@@ -206,8 +206,59 @@ memPath \u5FC5\u987B\u662F 0\u30011 \u6216 2\uFF0C\u6309\u4EE5\u4E0B\u89C4\u5219
 \u8BF7\u5206\u6790\u5E76\u8FD4\u56DE JSON\u3002`;
 }
 
-// 分形/pipeline.ts
+// 分形/lib/no-feedback.ts
 import fs from "node:fs";
+var NO_FEEDBACK_THRESHOLD = 3;
+function emptyNoFeedbackState() {
+  return { consecutiveTurns: 0, lastSessionId: "", updatedAt: "" };
+}
+function readNoFeedbackState(filePath) {
+  try {
+    if (fs.existsSync(filePath)) {
+      const raw = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+      return {
+        consecutiveTurns: Number(raw.consecutiveTurns) || 0,
+        lastSessionId: String(raw.lastSessionId || ""),
+        updatedAt: String(raw.updatedAt || "")
+      };
+    }
+  } catch {
+  }
+  return emptyNoFeedbackState();
+}
+function saveNoFeedbackState(filePath, state) {
+  try {
+    state.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    fs.writeFileSync(filePath, JSON.stringify(state, null, 2), "utf-8");
+  } catch {
+  }
+}
+function resetForNewSession(state, sessionId) {
+  const sid = sessionId || "";
+  if (sid && state.lastSessionId !== sid) {
+    return { ...state, consecutiveTurns: 0, lastSessionId: sid };
+  }
+  return state;
+}
+function updateNoFeedbackCount(state, editsThisTurn, bashCalledThisTurn) {
+  if (editsThisTurn > 0 && !bashCalledThisTurn) {
+    return { ...state, consecutiveTurns: state.consecutiveTurns + 1 };
+  }
+  if (bashCalledThisTurn) {
+    return { ...state, consecutiveTurns: 0 };
+  }
+  return state;
+}
+function buildNoFeedbackWarning(consecutiveTurns, threshold = NO_FEEDBACK_THRESHOLD) {
+  if (consecutiveTurns < threshold) return null;
+  return `
+## \u26A0\uFE0F \u5206\u5F62\uFF1A\u7F3A\u5C11\u53CD\u9988\u73AF
+\u8FDE\u7EED ${consecutiveTurns} \u8F6E\u4FEE\u6539\u4EE3\u7801\u4F46\u672A\u6267\u884C\u6D4B\u8BD5\u3002\u6309\u7167\u7ED3\u6784\u5316\u8C03\u8BD5\u6D41\u7A0B\uFF0C\u5148\u5EFA\u7ACB\u53CD\u9988\u73AF\u518D\u4FEE\u590D\uFF08Phase 1\uFF09\u3002\u5728\u4E0B\u4E00\u8F6E\u4FEE\u6539\u4EE3\u7801\u524D\uFF0C\u5148\u8DD1\u4E00\u6B21\u76F8\u5173\u6D4B\u8BD5\u5EFA\u7ACB"\u80FD\u53D8\u7EA2"\u7684\u53CD\u9988\u73AF\u3002
+`;
+}
+
+// 分形/pipeline.ts
+import fs2 from "node:fs";
 import path from "node:path";
 import os from "node:os";
 var HOME = os.homedir();
@@ -320,8 +371,8 @@ function checkGateReleaseSignal(message) {
 }
 function readPipelineState() {
   try {
-    if (!fs.existsSync(PIPELINE_STATE_FILE)) return null;
-    const raw = fs.readFileSync(PIPELINE_STATE_FILE, "utf-8");
+    if (!fs2.existsSync(PIPELINE_STATE_FILE)) return null;
+    const raw = fs2.readFileSync(PIPELINE_STATE_FILE, "utf-8");
     const parsed = JSON.parse(raw);
     if (!parsed.pipelineId || !parsed.currentStage || !parsed.stages) return null;
     return parsed;
@@ -332,18 +383,18 @@ function readPipelineState() {
 function writePipelineState(state) {
   try {
     const dir = path.dirname(PIPELINE_STATE_FILE);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
+    if (!fs2.existsSync(dir)) {
+      fs2.mkdirSync(dir, { recursive: true });
     }
     state.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    fs.writeFileSync(PIPELINE_STATE_FILE, JSON.stringify(state, null, 2), "utf-8");
+    fs2.writeFileSync(PIPELINE_STATE_FILE, JSON.stringify(state, null, 2), "utf-8");
   } catch {
   }
 }
 function clearPipelineState() {
   try {
-    if (fs.existsSync(PIPELINE_STATE_FILE)) {
-      fs.unlinkSync(PIPELINE_STATE_FILE);
+    if (fs2.existsSync(PIPELINE_STATE_FILE)) {
+      fs2.unlinkSync(PIPELINE_STATE_FILE);
     }
   } catch {
   }
@@ -393,10 +444,10 @@ function isStageComplete(state, projectDir, lastAssistantMessage) {
 }
 function checkDesignStageComplete(state, projectDir, lastMsg) {
   const designFile = path.join(projectDir, "doc", "\u8BBE\u8BA1", `${state.context.feature}.md`);
-  if (!fs.existsSync(designFile)) return false;
+  if (!fs2.existsSync(designFile)) return false;
   if (state.taskType === "web-app") {
     const protoFile = path.join(projectDir, "doc", "\u539F\u578B", `${state.context.feature}.md`);
-    if (!fs.existsSync(protoFile)) return false;
+    if (!fs2.existsSync(protoFile)) return false;
   }
   if (lastMsg && !checkDesignDoneSignal(lastMsg)) return false;
   return true;
@@ -404,8 +455,8 @@ function checkDesignStageComplete(state, projectDir, lastMsg) {
 function checkPlanStageComplete(state) {
   try {
     const plansDir = path.join(OC_CONFIG, "plans");
-    if (!fs.existsSync(plansDir)) return false;
-    const files = fs.readdirSync(plansDir).filter((f) => f.endsWith(".md"));
+    if (!fs2.existsSync(plansDir)) return false;
+    const files = fs2.readdirSync(plansDir).filter((f) => f.endsWith(".md"));
     return files.some((f) => f.includes(state.context.feature));
   } catch {
     return false;
@@ -568,7 +619,7 @@ function getStageSkipRejection(feature) {
 }
 
 // 分形/dedup-checker.ts
-import fs2 from "node:fs";
+import fs3 from "node:fs";
 import path2 from "node:path";
 import os2 from "node:os";
 var HOME2 = os2.homedir();
@@ -577,8 +628,8 @@ var DEDUP_STATE_FILE = path2.join(MEMORIES_DIR2, ".dedup-last-check.json");
 var DEDUP_CHECK_INTERVAL = 15;
 function readDedupState() {
   try {
-    if (fs2.existsSync(DEDUP_STATE_FILE)) {
-      return JSON.parse(fs2.readFileSync(DEDUP_STATE_FILE, "utf-8"));
+    if (fs3.existsSync(DEDUP_STATE_FILE)) {
+      return JSON.parse(fs3.readFileSync(DEDUP_STATE_FILE, "utf-8"));
     }
   } catch {
   }
@@ -586,7 +637,7 @@ function readDedupState() {
 }
 function writeDedupState(state) {
   try {
-    fs2.writeFileSync(DEDUP_STATE_FILE, JSON.stringify(state, null, 2), "utf-8");
+    fs3.writeFileSync(DEDUP_STATE_FILE, JSON.stringify(state, null, 2), "utf-8");
   } catch {
   }
 }
@@ -622,10 +673,10 @@ function loadAllMemories(projectDir) {
   ];
   if (projectDir) {
     const projectMemories = path2.join(projectDir, ".opencode", "memories");
-    if (fs2.existsSync(projectMemories)) {
+    if (fs3.existsSync(projectMemories)) {
       const projectBlocks = path2.join(projectMemories, "blocks");
       const projectTriggers = path2.join(projectMemories, "triggers");
-      if (fs2.existsSync(projectBlocks) || fs2.existsSync(projectTriggers)) {
+      if (fs3.existsSync(projectBlocks) || fs3.existsSync(projectTriggers)) {
         globalRoots.push([projectBlocks, projectTriggers]);
       }
     }
@@ -634,20 +685,20 @@ function loadAllMemories(projectDir) {
     for (const [rootDir, type] of [[blocksDir, "block"], [triggersDir, "trigger"]]) {
       for (const sd of statusDirs) {
         const dir = path2.join(rootDir, sd);
-        if (!fs2.existsSync(dir)) continue;
+        if (!fs3.existsSync(dir)) continue;
         try {
-          for (const f of fs2.readdirSync(dir).filter((f2) => f2.endsWith(".md"))) {
-            const content = fs2.readFileSync(path2.join(dir, f), "utf-8");
+          for (const f of fs3.readdirSync(dir).filter((f2) => f2.endsWith(".md"))) {
+            const content = fs3.readFileSync(path2.join(dir, f), "utf-8");
             const item = parseMemoryFile(f, path2.join(dir, f).replace(HOME2, "~"), content, type);
             if (item) items.push(item);
           }
         } catch {
         }
       }
-      if (fs2.existsSync(rootDir)) {
+      if (fs3.existsSync(rootDir)) {
         try {
-          for (const f of fs2.readdirSync(rootDir).filter((f2) => f2.endsWith(".md"))) {
-            const content = fs2.readFileSync(path2.join(rootDir, f), "utf-8");
+          for (const f of fs3.readdirSync(rootDir).filter((f2) => f2.endsWith(".md"))) {
+            const content = fs3.readFileSync(path2.join(rootDir, f), "utf-8");
             const item = parseMemoryFile(f, path2.join(rootDir, f).replace(HOME2, "~"), content, type);
             if (item && !items.some((e) => e.fileName === item.fileName && e.memPath === item.memPath)) {
               items.push(item);
@@ -812,7 +863,7 @@ ${items}${more}
 }
 
 // 分形/engine/engine.ts
-import fs3 from "node:fs";
+import fs4 from "node:fs";
 import path3 from "node:path";
 
 // 分形/engine/bm25.ts
@@ -1224,8 +1275,8 @@ var KnowledgeEngine = class _KnowledgeEngine {
    */
   static scanDir(dirPath) {
     const results = [];
-    if (fs3.existsSync(dirPath)) {
-      for (const entry of fs3.readdirSync(dirPath, { withFileTypes: true })) {
+    if (fs4.existsSync(dirPath)) {
+      for (const entry of fs4.readdirSync(dirPath, { withFileTypes: true })) {
         if (entry.isFile() && entry.name.endsWith(".md")) {
           const filePath = path3.join(dirPath, entry.name);
           results.push({
@@ -1238,8 +1289,8 @@ var KnowledgeEngine = class _KnowledgeEngine {
     }
     for (const sub of STATUS_DIRS) {
       const subDir = path3.join(dirPath, sub);
-      if (fs3.existsSync(subDir)) {
-        for (const entry of fs3.readdirSync(subDir, { withFileTypes: true })) {
+      if (fs4.existsSync(subDir)) {
+        for (const entry of fs4.readdirSync(subDir, { withFileTypes: true })) {
           if (entry.isFile() && entry.name.endsWith(".md")) {
             const filePath = path3.join(subDir, entry.name);
             results.push({
@@ -1260,7 +1311,7 @@ var KnowledgeEngine = class _KnowledgeEngine {
   _scanAll() {
     const seen = /* @__PURE__ */ new Set();
     for (const dir of this.dirs) {
-      if (!fs3.existsSync(dir)) continue;
+      if (!fs4.existsSync(dir)) continue;
       const entries = _KnowledgeEngine.scanDir(dir);
       for (const entry of entries) {
         const meta = _KnowledgeEngine.parseMeta(entry.content, 400);
@@ -1317,7 +1368,7 @@ var KnowledgeEngine = class _KnowledgeEngine {
 };
 function _safeReadFile(filePath) {
   try {
-    return fs3.readFileSync(filePath, "utf-8");
+    return fs4.readFileSync(filePath, "utf-8");
   } catch {
     return "";
   }
@@ -1338,12 +1389,12 @@ function _extractBody(content) {
 // 分形/fractal.ts
 var _FRACTAL_DEBUG_FLAG = path4.join(os3.homedir(), ".config", "opencode", "memories", ".fractal-debug");
 var _FRACTAL_DEBUG_LOG = path4.join(os3.homedir(), ".config", "opencode", "memories", "fractal-startup.log");
-var _IS_FRACTAL_DEBUG = fs4.existsSync(_FRACTAL_DEBUG_FLAG);
+var _IS_FRACTAL_DEBUG = fs5.existsSync(_FRACTAL_DEBUG_FLAG);
 var _fractalDebug = _IS_FRACTAL_DEBUG ? (label) => {
   const line = `[${(/* @__PURE__ */ new Date()).toISOString()}] ${label}
 `;
   try {
-    fs4.appendFileSync(_FRACTAL_DEBUG_LOG, line);
+    fs5.appendFileSync(_FRACTAL_DEBUG_LOG, line);
   } catch {
   }
   console.log(`[fractal:debug] ${label}`);
@@ -1374,10 +1425,9 @@ var ASSERTION_RE = /(?:不支持|做不到|只有\s*\d+\s*种|(?<!\S)(?:没有|�
 var WEBSEARCH_TOOLS = /websearch|web_search|webfetch/;
 var COUNTER_DECAY_TURNS = 3;
 var ASSERTION_SECTION_THRESHOLDS = [1, 3];
-var NO_FEEDBACK_THRESHOLD = 3;
 function isLinePaused(line) {
   try {
-    return fs4.existsSync(PAUSE_PREFIX + line + ".json");
+    return fs5.existsSync(PAUSE_PREFIX + line + ".json");
   } catch {
     return false;
   }
@@ -1385,8 +1435,8 @@ function isLinePaused(line) {
 function loadPrompt(filename, fallback) {
   try {
     const fpath = path4.join(PROMPT_DIR, filename);
-    if (fs4.existsSync(fpath)) {
-      return fs4.readFileSync(fpath, "utf-8").trim();
+    if (fs5.existsSync(fpath)) {
+      return fs5.readFileSync(fpath, "utf-8").trim();
     }
   } catch {
   }
@@ -1427,34 +1477,34 @@ function getSection(count, thresholds) {
 }
 function rotateLog(logPath, maxSize = MAX_LOG_SIZE) {
   try {
-    if (!fs4.existsSync(logPath)) return;
-    const stat = fs4.statSync(logPath);
+    if (!fs5.existsSync(logPath)) return;
+    const stat = fs5.statSync(logPath);
     if (stat.size <= maxSize) return;
-    const content = fs4.readFileSync(logPath, "utf-8");
+    const content = fs5.readFileSync(logPath, "utf-8");
     const keepSize = Math.floor(maxSize / 2);
     const tail = content.slice(-keepSize);
     const firstNewline = tail.indexOf("\n");
-    fs4.writeFileSync(logPath, firstNewline > 0 ? tail.slice(firstNewline + 1) : tail, "utf-8");
-    debug(`LOG: \u8F6E\u8F6C ${logPath}\uFF0C${stat.size} \u2192 ${fs4.statSync(logPath).size} bytes`);
+    fs5.writeFileSync(logPath, firstNewline > 0 ? tail.slice(firstNewline + 1) : tail, "utf-8");
+    debug(`LOG: \u8F6E\u8F6C ${logPath}\uFF0C${stat.size} \u2192 ${fs5.statSync(logPath).size} bytes`);
   } catch {
   }
 }
 function debug(msg) {
   try {
-    fs4.appendFileSync(DEBUG_LOG, `${(/* @__PURE__ */ new Date()).toISOString()} ${msg}
+    fs5.appendFileSync(DEBUG_LOG, `${(/* @__PURE__ */ new Date()).toISOString()} ${msg}
 `, "utf-8");
   } catch {
   }
 }
 function ensureDir(dir) {
-  if (!fs4.existsSync(dir)) {
-    fs4.mkdirSync(dir, { recursive: true });
+  if (!fs5.existsSync(dir)) {
+    fs5.mkdirSync(dir, { recursive: true });
   }
 }
 function safeReadFile(filePath) {
   try {
-    if (fs4.existsSync(filePath)) {
-      return fs4.readFileSync(filePath, "utf-8");
+    if (fs5.existsSync(filePath)) {
+      return fs5.readFileSync(filePath, "utf-8");
     }
   } catch {
   }
@@ -1481,8 +1531,8 @@ function extractKeywords2(text) {
 }
 function getActivePlanSummaries() {
   try {
-    if (!fs4.existsSync(PLANS_DIR)) return [];
-    const files = fs4.readdirSync(PLANS_DIR).filter((f) => f.endsWith(".md"));
+    if (!fs5.existsSync(PLANS_DIR)) return [];
+    const files = fs5.readdirSync(PLANS_DIR).filter((f) => f.endsWith(".md"));
     if (files.length === 0) return [];
     const summaries = [];
     const activePlans = [];
@@ -1548,7 +1598,7 @@ function getActivePlanSummaries() {
       });
     }
     try {
-      fs4.writeFileSync(
+      fs5.writeFileSync(
         path4.join(PLANS_DIR, ".active.json"),
         JSON.stringify({ activePlans, updatedAt: (/* @__PURE__ */ new Date()).toISOString() }, null, 2),
         "utf-8"
@@ -1605,7 +1655,7 @@ function getMemoryPaths(projectDir) {
   }
   if (projectDir) {
     const sharedPath = path4.join(projectDir, ".opencode", "memories");
-    if (fs4.existsSync(sharedPath)) {
+    if (fs5.existsSync(sharedPath)) {
       paths.push(sharedPath);
     }
   }
@@ -1664,8 +1714,8 @@ function getStatusSubDir(status) {
 }
 function readBlocksDir(blocksDir) {
   const results = [];
-  if (fs4.existsSync(blocksDir)) {
-    for (const entry of fs4.readdirSync(blocksDir, { withFileTypes: true })) {
+  if (fs5.existsSync(blocksDir)) {
+    for (const entry of fs5.readdirSync(blocksDir, { withFileTypes: true })) {
       if (entry.isFile() && entry.name.endsWith(".md")) {
         results.push({ fileName: entry.name, content: safeReadFile(path4.join(blocksDir, entry.name)), relPath: entry.name });
       }
@@ -1673,8 +1723,8 @@ function readBlocksDir(blocksDir) {
   }
   for (const sub of STATUS_DIRS2) {
     const subDir = path4.join(blocksDir, sub);
-    if (fs4.existsSync(subDir)) {
-      for (const entry of fs4.readdirSync(subDir, { withFileTypes: true })) {
+    if (fs5.existsSync(subDir)) {
+      for (const entry of fs5.readdirSync(subDir, { withFileTypes: true })) {
         if (entry.isFile() && entry.name.endsWith(".md")) {
           results.push({ fileName: entry.name, content: safeReadFile(path4.join(subDir, entry.name)), relPath: `${sub}/${entry.name}` });
         }
@@ -1685,8 +1735,8 @@ function readBlocksDir(blocksDir) {
 }
 function readTriggersDir(triggersDir) {
   const results = [];
-  if (fs4.existsSync(triggersDir)) {
-    for (const entry of fs4.readdirSync(triggersDir, { withFileTypes: true })) {
+  if (fs5.existsSync(triggersDir)) {
+    for (const entry of fs5.readdirSync(triggersDir, { withFileTypes: true })) {
       if (entry.isFile() && entry.name.endsWith(".md")) {
         results.push({ fileName: entry.name, content: safeReadFile(path4.join(triggersDir, entry.name)), relPath: entry.name });
       }
@@ -1694,8 +1744,8 @@ function readTriggersDir(triggersDir) {
   }
   for (const sub of STATUS_DIRS2) {
     const subDir = path4.join(triggersDir, sub);
-    if (fs4.existsSync(subDir)) {
-      for (const entry of fs4.readdirSync(subDir, { withFileTypes: true })) {
+    if (fs5.existsSync(subDir)) {
+      for (const entry of fs5.readdirSync(subDir, { withFileTypes: true })) {
         if (entry.isFile() && entry.name.endsWith(".md")) {
           results.push({ fileName: entry.name, content: safeReadFile(path4.join(subDir, entry.name)), relPath: `${sub}/${entry.name}` });
         }
@@ -1715,10 +1765,10 @@ function resolveWritePath(basePath, category, fileName, content) {
 function findBlockFile(basePath, fileName) {
   for (const sub of STATUS_DIRS2) {
     const p = path4.join(basePath, "blocks", sub, fileName);
-    if (fs4.existsSync(p)) return p;
+    if (fs5.existsSync(p)) return p;
   }
   const flat = path4.join(basePath, "blocks", fileName);
-  return fs4.existsSync(flat) ? flat : null;
+  return fs5.existsSync(flat) ? flat : null;
 }
 function parseMeta(content, maxIndex = 100) {
   const meta = {};
@@ -1748,15 +1798,15 @@ function extractTriggerContent(content) {
 function logEvent(event) {
   try {
     const line = JSON.stringify({ ts: (/* @__PURE__ */ new Date()).toISOString(), event }) + "\n";
-    fs4.appendFileSync(EVENT_LOG, line, "utf-8");
+    fs5.appendFileSync(EVENT_LOG, line, "utf-8");
     rotateLog(EVENT_LOG);
   } catch {
   }
 }
 function getLastAnalysis() {
   try {
-    if (fs4.existsSync(LAST_ANALYSIS)) {
-      return JSON.parse(fs4.readFileSync(LAST_ANALYSIS, "utf-8"));
+    if (fs5.existsSync(LAST_ANALYSIS)) {
+      return JSON.parse(fs5.readFileSync(LAST_ANALYSIS, "utf-8"));
     }
   } catch {
   }
@@ -1764,14 +1814,14 @@ function getLastAnalysis() {
 }
 function saveLastAnalysis(ts, count) {
   try {
-    fs4.writeFileSync(LAST_ANALYSIS, JSON.stringify({ ts, count }), "utf-8");
+    fs5.writeFileSync(LAST_ANALYSIS, JSON.stringify({ ts, count }), "utf-8");
   } catch {
   }
 }
 function getNewEvents() {
-  if (!fs4.existsSync(EVENT_LOG)) return [];
+  if (!fs5.existsSync(EVENT_LOG)) return [];
   const last = getLastAnalysis();
-  const lines = fs4.readFileSync(EVENT_LOG, "utf-8").split("\n").filter(Boolean);
+  const lines = fs5.readFileSync(EVENT_LOG, "utf-8").split("\n").filter(Boolean);
   const newLines = last.ts ? lines.filter((line) => {
     try {
       const lastTs = last.ts;
@@ -1791,7 +1841,7 @@ async function getApiConfig() {
   const configPath = path4.join(OC_CONFIG2, "opencode.json");
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const raw = fs4.readFileSync(configPath, "utf-8").replace(/^\uFEFF/, "");
+      const raw = fs5.readFileSync(configPath, "utf-8").replace(/^\uFEFF/, "");
       const config = JSON.parse(raw);
       const fullModel = String(config.model || "");
       const colonIdx = fullModel.indexOf(":");
@@ -2064,7 +2114,7 @@ function applyAnalysisResult(resultJson, memoryPaths) {
     }
     const filePath = resolveWritePath(basePath, category, action.file, action.content);
     try {
-      fs4.writeFileSync(filePath, action.content, "utf-8");
+      fs5.writeFileSync(filePath, action.content, "utf-8");
       debug(`FRACTAL: ${action.type} \u2192 ${filePath} (${action.reason})`);
     } catch (err) {
       debug(`FRACTAL: \u5199\u5165\u5931\u8D25 ${filePath}: ${String(err)}`);
@@ -2166,9 +2216,9 @@ function findRelatedFiles(filePath, projectDir) {
   }
   const result = { docs: [], tests: [] };
   const docsDir = path4.join(projectDir, "doc", "\u8BBE\u8BA1");
-  if (fs4.existsSync(docsDir)) {
+  if (fs5.existsSync(docsDir)) {
     try {
-      for (const f of fs4.readdirSync(docsDir)) {
+      for (const f of fs5.readdirSync(docsDir)) {
         if (result.docs.length >= 5) break;
         const name = f.replace(path4.extname(f), "");
         for (const kw of keywords) {
@@ -2183,7 +2233,7 @@ function findRelatedFiles(filePath, projectDir) {
     }
   }
   const testsDir = path4.join(projectDir, "tests");
-  if (fs4.existsSync(testsDir)) {
+  if (fs5.existsSync(testsDir)) {
     result.tests = findTestFiles(testsDir, keywords, projectDir);
   }
   return result;
@@ -2192,7 +2242,7 @@ function findTestFiles(dir, keywords, projectDir, depth = 0) {
   if (depth > 2) return [];
   const results = [];
   try {
-    for (const entry of fs4.readdirSync(dir, { withFileTypes: true })) {
+    for (const entry of fs5.readdirSync(dir, { withFileTypes: true })) {
       const full = path4.join(dir, entry.name);
       if (entry.isDirectory()) {
         results.push(...findTestFiles(full, keywords, projectDir, depth + 1));
@@ -2282,8 +2332,8 @@ ${items.join("\n")}`;
 }
 function readCounter() {
   try {
-    if (fs4.existsSync(ASSERTION_COUNTER)) {
-      const raw = JSON.parse(fs4.readFileSync(ASSERTION_COUNTER, "utf-8"));
+    if (fs5.existsSync(ASSERTION_COUNTER)) {
+      const raw = JSON.parse(fs5.readFileSync(ASSERTION_COUNTER, "utf-8"));
       return {
         count: Number(raw.count) || 0,
         lastSnippet: String(raw.lastSnippet || ""),
@@ -2299,7 +2349,7 @@ function readCounter() {
 function saveCounter(state) {
   try {
     state.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    fs4.writeFileSync(ASSERTION_COUNTER, JSON.stringify(state, null, 2), "utf-8");
+    fs5.writeFileSync(ASSERTION_COUNTER, JSON.stringify(state, null, 2), "utf-8");
   } catch {
   }
 }
@@ -2343,33 +2393,12 @@ function decayCounter(sessionId) {
     saveCounter(c);
   }
 }
-function readNoFeedbackState() {
-  try {
-    if (fs4.existsSync(NO_FEEDBACK_STATE)) {
-      const raw = JSON.parse(fs4.readFileSync(NO_FEEDBACK_STATE, "utf-8"));
-      return {
-        consecutiveTurns: Number(raw.consecutiveTurns) || 0,
-        lastSessionId: String(raw.lastSessionId || ""),
-        updatedAt: String(raw.updatedAt || "")
-      };
-    }
-  } catch {
-  }
-  return { consecutiveTurns: 0, lastSessionId: "", updatedAt: "" };
-}
-function saveNoFeedbackState(state) {
-  try {
-    state.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    fs4.writeFileSync(NO_FEEDBACK_STATE, JSON.stringify(state, null, 2), "utf-8");
-  } catch {
-  }
-}
 var DECAY_STATE_FILE = path4.join(MEMORIES_DIR3, ".decay-state.json");
 var DECAY_DEBOUNCE_MS = 3e4;
 function readDecayState() {
   try {
-    if (fs4.existsSync(DECAY_STATE_FILE)) {
-      return JSON.parse(fs4.readFileSync(DECAY_STATE_FILE, "utf-8"));
+    if (fs5.existsSync(DECAY_STATE_FILE)) {
+      return JSON.parse(fs5.readFileSync(DECAY_STATE_FILE, "utf-8"));
     }
   } catch {
   }
@@ -2377,7 +2406,7 @@ function readDecayState() {
 }
 function saveDecayState(state) {
   try {
-    fs4.writeFileSync(DECAY_STATE_FILE, JSON.stringify(state, null, 2), "utf-8");
+    fs5.writeFileSync(DECAY_STATE_FILE, JSON.stringify(state, null, 2), "utf-8");
   } catch {
   }
 }
@@ -2398,13 +2427,13 @@ function decayAndPersist(decayed, memoryPaths) {
       const fpath = findBlockFile(mp, d.label + ".md");
       if (!fpath) continue;
       try {
-        let content = fs4.readFileSync(fpath, "utf-8");
+        let content = fs5.readFileSync(fpath, "utf-8");
         const priMatch = content.match(/<!--\s*priority:\s*(\d+)\s*-->/);
         const oldPri = priMatch ? parseInt(priMatch[1], 10) : 50;
         const newPri = Math.max(floor, oldPri - decrement);
         if (newPri < oldPri && priMatch) {
           content = content.replace(priMatch[0], `<!-- priority: ${newPri} -->`);
-          fs4.writeFileSync(fpath, content, "utf-8");
+          fs5.writeFileSync(fpath, content, "utf-8");
           state.lastDecayWrite[d.label] = now;
           state.missedRounds[d.label] = 0;
           debug(`DECAY: ${d.label} priority ${oldPri}\u2192${newPri}`);
@@ -2418,12 +2447,12 @@ function decayAndPersist(decayed, memoryPaths) {
 }
 async function checkAndExtractCommitKnowledge(projectDir, memoryPaths) {
   const cwd = projectDir || ".";
-  if (!fs4.existsSync(path4.join(cwd, ".git"))) return false;
+  if (!fs5.existsSync(path4.join(cwd, ".git"))) return false;
   let lastCheckFile = path4.join(MEMORIES_DIR3, ".commit-last-check.json");
   let lastCheck = "";
   try {
-    if (fs4.existsSync(lastCheckFile)) {
-      lastCheck = JSON.parse(fs4.readFileSync(lastCheckFile, "utf-8")).ts || "";
+    if (fs5.existsSync(lastCheckFile)) {
+      lastCheck = JSON.parse(fs5.readFileSync(lastCheckFile, "utf-8")).ts || "";
     }
   } catch {
   }
@@ -2440,7 +2469,7 @@ async function checkAndExtractCommitKnowledge(projectDir, memoryPaths) {
   }
   if (!commitMsg || commitTs <= lastCheck) return false;
   try {
-    fs4.writeFileSync(lastCheckFile, JSON.stringify({ ts: commitTs }), "utf-8");
+    fs5.writeFileSync(lastCheckFile, JSON.stringify({ ts: commitTs }), "utf-8");
   } catch {
   }
   if (/^(Merge|Bump|chore\(deps\)|\(bot\))/i.test(commitMsg.split("\n")[0])) {
@@ -2498,7 +2527,7 @@ async function checkAndExtractCommitKnowledge(projectDir, memoryPaths) {
       for (const item of parsed.items) {
         const mp = memoryPaths[parseInt(item.memPath, 10)] || MEMORIES_DIR3;
         const fpath = resolveWritePath(mp, "blocks", item.file, item.content);
-        fs4.writeFileSync(fpath, item.content, "utf-8");
+        fs5.writeFileSync(fpath, item.content, "utf-8");
         debug(`\u89E6\u53D1\u7EBF5: \u5199\u5165\u77E5\u8BC6 \u2192 ${item.file} (${item.reason})`);
       }
     }
@@ -2510,7 +2539,7 @@ async function checkAndExtractCommitKnowledge(projectDir, memoryPaths) {
 var FractalPlugin = async (input, _options) => {
   _fractalDebug("FACTORY: called");
   try {
-    fs4.writeFileSync(path4.join(MEMORIES_DIR3, ".fractal-healthcheck"), JSON.stringify({ ts: (/* @__PURE__ */ new Date()).toISOString(), pid: process.pid }));
+    fs5.writeFileSync(path4.join(MEMORIES_DIR3, ".fractal-healthcheck"), JSON.stringify({ ts: (/* @__PURE__ */ new Date()).toISOString(), pid: process.pid }));
   } catch {
   }
   ensureDir(MEMORIES_DIR3);
@@ -2526,10 +2555,10 @@ var FractalPlugin = async (input, _options) => {
   try {
     const dumpLines = [];
     for (const mp of [path4.join(MEMORIES_DIR3, "blocks"), path4.join(projectDir || "", ".opencode", "memories", "blocks")]) {
-      if (!fs4.existsSync(mp)) continue;
-      for (const f of fs4.readdirSync(mp)) {
+      if (!fs5.existsSync(mp)) continue;
+      for (const f of fs5.readdirSync(mp)) {
         if (!f.endsWith(".md")) continue;
-        const content = fs4.readFileSync(path4.join(mp, f), "utf-8");
+        const content = fs5.readFileSync(path4.join(mp, f), "utf-8");
         dumpLines.push(`## ${f}
 
 ${content}
@@ -2537,7 +2566,7 @@ ${content}
       }
     }
     if (dumpLines.length > 0) {
-      fs4.writeFileSync(path4.join(MEMORIES_DIR3, "dump.md"), dumpLines.join("\n---\n"), "utf-8");
+      fs5.writeFileSync(path4.join(MEMORIES_DIR3, "dump.md"), dumpLines.join("\n---\n"), "utf-8");
     }
   } catch {
   }
@@ -2584,7 +2613,7 @@ ${content}
   const KEEP_WARM_ROUNDS = 5;
   function readKeepWarmState() {
     try {
-      if (fs4.existsSync(KEEP_WARM_FILE)) return JSON.parse(fs4.readFileSync(KEEP_WARM_FILE, "utf-8"));
+      if (fs5.existsSync(KEEP_WARM_FILE)) return JSON.parse(fs5.readFileSync(KEEP_WARM_FILE, "utf-8"));
     } catch {
     }
     return {};
@@ -2595,7 +2624,7 @@ ${content}
       if (turnCounter - v <= KEEP_WARM_ROUNDS * 2) pruned[k] = v;
     }
     try {
-      fs4.writeFileSync(KEEP_WARM_FILE, JSON.stringify(pruned, null, 0), "utf-8");
+      fs5.writeFileSync(KEEP_WARM_FILE, JSON.stringify(pruned, null, 0), "utf-8");
     } catch {
     }
   }
@@ -2653,8 +2682,8 @@ ${sp}
       }
       const c = readCounter();
       try {
-        if (fs4.existsSync(ASSERTION_FLAG)) {
-          fs4.unlinkSync(ASSERTION_FLAG);
+        if (fs5.existsSync(ASSERTION_FLAG)) {
+          fs5.unlinkSync(ASSERTION_FLAG);
         }
       } catch {
       }
@@ -2676,9 +2705,9 @@ ${reminder}
       const memoryPaths = getMemoryPaths(projectDir);
       let forceLearn = false;
       try {
-        if (fs4.existsSync(LEARN_FLAG)) {
+        if (fs5.existsSync(LEARN_FLAG)) {
           forceLearn = true;
-          fs4.unlinkSync(LEARN_FLAG);
+          fs5.unlinkSync(LEARN_FLAG);
           debug("FRACTAL: /fractal learn \u6807\u5FD7\u68C0\u6D4B\u5230\uFF0C\u5F3A\u5236\u89E6\u53D1\u5206\u6790");
         }
       } catch {
@@ -2766,7 +2795,7 @@ ${reminder}
         if (hits > maxRelevance) maxRelevance = hits;
         let mtimeMs = 0;
         try {
-          mtimeMs = fs4.statSync(fpath).mtimeMs;
+          mtimeMs = fs5.statSync(fpath).mtimeMs;
         } catch {
         }
         scored.push({ item: k, mtime: mtimeMs, relevance: hits, priority: k.priority || 50, category: k.category || "reference", score: 0 });
@@ -3070,16 +3099,13 @@ ${list}
         pendingWarnings = [];
       }
       if (!isLinePaused("2")) {
-        const nfs = readNoFeedbackState();
-        if (nfs.consecutiveTurns >= NO_FEEDBACK_THRESHOLD) {
-          const warning = `
-## \u26A0\uFE0F \u5206\u5F62\uFF1A\u7F3A\u5C11\u53CD\u9988\u73AF
-\u8FDE\u7EED ${nfs.consecutiveTurns} \u8F6E\u4FEE\u6539\u4EE3\u7801\u4F46\u672A\u6267\u884C\u6D4B\u8BD5\u3002\u6309\u7167\u7ED3\u6784\u5316\u8C03\u8BD5\u6D41\u7A0B\uFF0C\u5148\u5EFA\u7ACB\u53CD\u9988\u73AF\u518D\u4FEE\u590D\uFF08Phase 1\uFF09\u3002\u5728\u4E0B\u4E00\u8F6E\u4FEE\u6539\u4EE3\u7801\u524D\uFF0C\u5148\u8DD1\u4E00\u6B21\u76F8\u5173\u6D4B\u8BD5\u5EFA\u7ACB"\u80FD\u53D8\u7EA2"\u7684\u53CD\u9988\u73AF\u3002
-`;
+        const nfs = readNoFeedbackState(NO_FEEDBACK_STATE);
+        const warning = buildNoFeedbackWarning(nfs.consecutiveTurns, NO_FEEDBACK_THRESHOLD);
+        if (warning) {
           dynamicSections.push(warning);
           debug(`\u89E6\u53D1\u7EBF2\u6269\u5C55: chat.message \u6CE8\u5165\u65E0\u53CD\u9988\u73AF\u8B66\u544A\uFF0CconsecutiveTurns=${nfs.consecutiveTurns}`);
           nfs.consecutiveTurns = 0;
-          saveNoFeedbackState(nfs);
+          saveNoFeedbackState(NO_FEEDBACK_STATE, nfs);
         }
       }
       try {
@@ -3179,20 +3205,15 @@ ${lines.join("\n")}${suffix}`);
             if (!assertionDetectedThisTurn) {
               decayCounter(sessionID || "");
             }
-            const nfs = readNoFeedbackState();
-            const sid = sessionID || "";
-            if (sid && nfs.lastSessionId !== sid) {
-              nfs.consecutiveTurns = 0;
-              nfs.lastSessionId = sid;
-            }
+            let nfs = readNoFeedbackState(NO_FEEDBACK_STATE);
+            nfs = resetForNewSession(nfs, sessionID || "");
+            nfs = updateNoFeedbackCount(nfs, editsThisTurn, bashCalledThisTurn);
+            saveNoFeedbackState(NO_FEEDBACK_STATE, nfs);
             if (editsThisTurn > 0 && !bashCalledThisTurn) {
-              nfs.consecutiveTurns++;
               debug(`\u89E6\u53D1\u7EBF2\u6269\u5C55: consecutiveTurns=${nfs.consecutiveTurns}\uFF08\u4E0A\u8F6E ${editsThisTurn} \u6B21 edit\uFF0C\u65E0 bash\uFF09`);
             } else if (bashCalledThisTurn) {
-              nfs.consecutiveTurns = 0;
               debug(`\u89E6\u53D1\u7EBF2\u6269\u5C55: \u4E0A\u8F6E\u6709 bash \u2192 \u91CD\u7F6E\u8BA1\u6570`);
             }
-            saveNoFeedbackState(nfs);
             websearchCalledThisTurn = false;
             assertionDetectedThisTurn = false;
             bashCalledThisTurn = false;
@@ -3225,7 +3246,7 @@ ${lines.join("\n")}${suffix}`);
                 Math.max(0, content.search(ASSERTION_RE) - 40),
                 content.search(ASSERTION_RE) + 80
               );
-              fs4.writeFileSync(ASSERTION_FLAG, JSON.stringify({
+              fs5.writeFileSync(ASSERTION_FLAG, JSON.stringify({
                 ts: (/* @__PURE__ */ new Date()).toISOString(),
                 snippet: snippet.trim()
               }), "utf-8");
@@ -3271,19 +3292,19 @@ ${lines.join("\n")}${suffix}`);
                   if (sec.llm) {
                     const bf = path4.join(BLOCKS_DIR, `${ctx.feature}-\u5BF9\u9F50\u5171\u8BC6.md`);
                     try {
-                      fs4.mkdirSync(BLOCKS_DIR, { recursive: true });
+                      fs5.mkdirSync(BLOCKS_DIR, { recursive: true });
                     } catch {
                     }
-                    fs4.writeFileSync(bf, sec.llm, "utf-8");
+                    fs5.writeFileSync(bf, sec.llm, "utf-8");
                   }
                   if (sec.human) {
                     const dd = path4.join(projectDir || ".", "doc", "\u77E5\u8BC6", "\u5BF9\u9F50\u5171\u8BC6");
                     const hf = path4.join(dd, `${ctx.feature}.md`);
                     try {
-                      fs4.mkdirSync(dd, { recursive: true });
+                      fs5.mkdirSync(dd, { recursive: true });
                     } catch {
                     }
-                    fs4.writeFileSync(hf, sec.human, "utf-8");
+                    fs5.writeFileSync(hf, sec.human, "utf-8");
                   }
                 }
               }
@@ -3444,7 +3465,7 @@ ${pendingList}
           type: event.type,
           keys: Object.keys(event)
         };
-        fs4.appendFileSync(rawLog, JSON.stringify(sample) + "\n", "utf-8");
+        fs5.appendFileSync(rawLog, JSON.stringify(sample) + "\n", "utf-8");
         rotateLog(rawLog, 100 * 1024);
       } catch {
       }

@@ -24,6 +24,15 @@ import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
 import { getSystemPrompt, getUserPrompt } from "./lib/prompts.js";
+// 触发线 2 扩展：无反馈环检测状态管理（独立模块，2026-08-06 抽出保证可测试性）
+import {
+  NO_FEEDBACK_THRESHOLD,
+  readNoFeedbackState,
+  saveNoFeedbackState,
+  resetForNewSession,
+  updateNoFeedbackCount,
+  buildNoFeedbackWarning,
+} from "./lib/no-feedback.js";
 
 import * as pipeline from "./pipeline.js";
 import * as dedup from "./dedup-checker.js";
@@ -158,9 +167,6 @@ const COUNTER_DECAY_TURNS = 3;
 // 默认：1 次=温和提醒, 2-3 次=强硬提醒, 4+ 次=强制警告
 // 可在 assertion-reminder.md 首行用 <!-- thresholds: 1,3,5 --> 覆盖（逗号分隔）
 const ASSERTION_SECTION_THRESHOLDS = [1, 3]; // [温和上限, 强硬上限]，超过则为强制
-
-// 触发线 2 扩展：连续 N 轮有 file edit 但无 bash 执行后提醒
-const NO_FEEDBACK_THRESHOLD = 3;
 
 // /fractal pause <n> 检查：某条触发线是否被暂停
 function isLinePaused(line: string): boolean {
@@ -1516,34 +1522,8 @@ function decayCounter(sessionId: string) {
 
 // ============================================================
 // 触发线 2 扩展：无反馈环状态（跨轮持久）
+// 状态读写逻辑已抽到 lib/no-feedback.ts（2026-08-06），此处仅保留常量
 // ============================================================
-
-interface NoFeedbackState {
-  consecutiveTurns: number; // 连续无反馈环的轮数
-  lastSessionId: string;
-  updatedAt: string;
-}
-
-function readNoFeedbackState(): NoFeedbackState {
-  try {
-    if (fs.existsSync(NO_FEEDBACK_STATE)) {
-      const raw = JSON.parse(fs.readFileSync(NO_FEEDBACK_STATE, "utf-8"));
-      return {
-        consecutiveTurns: Number(raw.consecutiveTurns) || 0,
-        lastSessionId: String(raw.lastSessionId || ""),
-        updatedAt: String(raw.updatedAt || ""),
-      };
-    }
-  } catch { /* 静默 */ }
-  return { consecutiveTurns: 0, lastSessionId: "", updatedAt: "" };
-}
-
-function saveNoFeedbackState(state: NoFeedbackState) {
-  try {
-    state.updatedAt = new Date().toISOString();
-    fs.writeFileSync(NO_FEEDBACK_STATE, JSON.stringify(state, null, 2), "utf-8");
-  } catch { /* 静默 */ }
-}
 
 // ============================================================
 // 触发线 5：提交后知识提取
@@ -2450,13 +2430,13 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
       // 注意执行顺序：chat.message 钩子先于 event 钩子触发，此处读到的是上一轮的计数，
       // 即警告比实际超标晚 1 轮——阈值 3 时第 4 轮才注入，属可接受的权衡（无需改为同步）
       if (!isLinePaused("2")) {
-        const nfs = readNoFeedbackState();
-        if (nfs.consecutiveTurns >= NO_FEEDBACK_THRESHOLD) {
-          const warning = `\n## ⚠️ 分形：缺少反馈环\n连续 ${nfs.consecutiveTurns} 轮修改代码但未执行测试。按照结构化调试流程，先建立反馈环再修复（Phase 1）。在下一轮修改代码前，先跑一次相关测试建立"能变红"的反馈环。\n`;
+        const nfs = readNoFeedbackState(NO_FEEDBACK_STATE);
+        const warning = buildNoFeedbackWarning(nfs.consecutiveTurns, NO_FEEDBACK_THRESHOLD);
+        if (warning) {
           dynamicSections.push(warning);
           debug(`触发线2扩展: chat.message 注入无反馈环警告，consecutiveTurns=${nfs.consecutiveTurns}`);
           nfs.consecutiveTurns = 0;
-          saveNoFeedbackState(nfs);
+          saveNoFeedbackState(NO_FEEDBACK_STATE, nfs);
         }
       }
 
@@ -2591,24 +2571,19 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
             }
 
             // 触发线 2 扩展：用户新消息 → 处理上一轮的反馈环状态
-            const nfs = readNoFeedbackState();
             // 跨会话重置：会话变化（或首次初始化 lastSessionId 为空）时清空计数
             // 原实现要求 lastSessionId 非空才重置 → 首次运行永远为空，计数跨会话污染
             // sessionID 为空时跳过判断（事件偶发缺省场景不重置，避免误清计数）
-            const sid = sessionID || "";
-            if (sid && nfs.lastSessionId !== sid) {
-              nfs.consecutiveTurns = 0;
-              nfs.lastSessionId = sid;
-            }
+            let nfs = readNoFeedbackState(NO_FEEDBACK_STATE);
+            nfs = resetForNewSession(nfs, sessionID || "");
             // 上轮有 edit 但无 bash → 递增；有 bash → 重置；无 edit → 保持
+            nfs = updateNoFeedbackCount(nfs, editsThisTurn, bashCalledThisTurn);
+            saveNoFeedbackState(NO_FEEDBACK_STATE, nfs);
             if (editsThisTurn > 0 && !bashCalledThisTurn) {
-              nfs.consecutiveTurns++;
               debug(`触发线2扩展: consecutiveTurns=${nfs.consecutiveTurns}（上轮 ${editsThisTurn} 次 edit，无 bash）`);
             } else if (bashCalledThisTurn) {
-              nfs.consecutiveTurns = 0;
               debug(`触发线2扩展: 上轮有 bash → 重置计数`);
             }
-            saveNoFeedbackState(nfs);
 
             websearchCalledThisTurn = false;
             assertionDetectedThisTurn = false;
