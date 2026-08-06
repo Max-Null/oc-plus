@@ -8,7 +8,7 @@
 |---|---|---|
 | **助手** | 单 agent，一问一答 | 四 agent 协作：双星决策 → 工匠编码 → 军师审查 → 参谋纠偏 |
 | **记忆** | 无 | 分形 Guardian 自主分析操作习惯，跨会话持久保留 |
-| **联网查证** | 内置搜索，质量一般 | 四条 MCP 通道（配置模板提供）：Exa AI 搜索 + GitHub 代码搜索 + Context7 实时文档 + GitHub API |
+| **联网查证** | 内置搜索，质量一般 | 五条 MCP 通道（配置模板提供）：Exa AI 搜索 + Tavily 搜索 + GitHub 代码搜索 + Context7 实时文档 + GitHub API |
 | **编码方法论** | 无 | 深模块设计 + 红绿重构 + 结构化调试 + 12 异味审查 |
 | **代码审查** | 无 | 军师独立审查（双轴：规范轴 + 规格轴） |
 | **技能** | 少量内置 | 额外 14 个内置 skill（提交审查、代码整理、设计方案、PPT 压缩…） |
@@ -206,6 +206,9 @@ opencode plugin opencode-acp@latest --global
   "websearch": {
     "url": "https://mcp.exa.ai/mcp?tools=web_search_exa"
   },
+  "tavily": {
+    "url": "https://mcp.tavily.com/mcp/?tavilyApiKey=your-key"
+  },
   "gh_grep": {
     "url": "https://mcp.grep.app"
   },
@@ -217,10 +220,13 @@ opencode plugin opencode-acp@latest --global
 
 | MCP | 用途 | 需要认证 |
 |-----|------|:---:|
-| websearch | Exa AI 搜索（免费匿名可用，有限速） | 可选 |
+| websearch | Exa AI 搜索（免费匿名可用，1,000 次/月） | 可选 |
+| tavily | Tavily 搜索（免费注册即用，1,000 credits/月，无需信用卡） | API key |
 | github | GitHub 操作（PR/Issue/搜索） | PAT |
 | gh_grep | GitHub 代码全文搜索 | 不需要 |
 | context7 | 实时库文档（免费 1,000 次/月） | 可选 |
+
+> **搜索额度组合**：websearch（Exa）+ tavily 合计 2,000 次/月免费搜索，两家可互为备份（一家限流自动切另一家）。Tavily 注册：app.tavily.com（邮箱注册，官方明确无需信用卡）。
 
 **6. 权限**
 
@@ -228,6 +234,7 @@ opencode plugin opencode-acp@latest --global
 "permissions": {
   "github": "allow",
   "websearch": "allow",
+  "tavily": "allow",
   "webfetch": "allow",
   "gh_grep": "allow",
   "context7": "allow"

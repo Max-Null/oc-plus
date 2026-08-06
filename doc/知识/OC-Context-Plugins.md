@@ -4,6 +4,8 @@
 >
 > 安装命令：`opencode plugin opencode-acp@latest --global`
 > 安装后必须禁用 OC 内置压缩：`opencode.json` 中 `"compaction": { "auto": false }`
+>
+> **2026-08-06 补充**：新增 [实战踩坑：Clash 代理导致压缩 fetch failed](#实战踩坑clash-代理导致压缩-fetch-failed)
 
 ## 社区插件
 
@@ -91,3 +93,52 @@ V2.0 三层漏斗 + DCP/ACP 可以互补：
 - rubric（判断时机）还停留在「模型窗口 55%」这种粗糙阈值
 
 **根本瓶颈不是压缩质量，是判断时机的智能化**——而这恰好是 guardian agent 可以承担的职责：观察会话特征 → 判断该不该裁 → 触发 LLM 主动压缩。
+
+---
+
+## 实战踩坑：Clash 代理导致压缩 fetch failed
+
+> 2026-08-06 · 症状、根因、修复全记录。**凡是用 Clash for Windows 类代理 + OC Desktop 的用户都可能遇到。**
+
+### 症状
+
+- 多个会话的 compress 工具调用持续返回 `fetch failed`（网络层 TypeError，非 HTTP 错误码）
+- `acp_status` 能返回但全部为 0（内部 `fetchSessionMessages` 失败被 try/catch 吞掉）
+- 外部 curl/Node fetch 访问本地 server 全部正常 → 排查指向插件进程内部
+
+### 根因
+
+1. **ACP 压缩主流程纯本地**：`createCompressRangeTool` → `client.session.messages()` → SDK `GET /session/{id}/message`（走本地 HTTP，不调 LLM）
+2. **OC Desktop server 只监听 IPv4**：`127.0.0.1:随机端口`，且每次重启端口变化
+3. **Clash 开启时（WinINET ProxyEnable=1）**：插件进程的本地回环请求被送进 127.0.0.1:7890 代理
+4. **Clash 订阅规则含 `IP-CIDR,127.0.0.1/32,REJECT,no-resolve`** → 本地请求被 REJECT → `fetch failed`
+5. Electron 网络栈同样受影响（desktop main.log 出现 `net::ERR_PROXY_CONNECTION_FAILED`）
+
+### 修复：CFW Parsers 注入本地 DIRECT 规则
+
+直接改订阅文件无效（订阅每 24h 自动刷新覆盖）。正确做法是用 Clash for Windows 的 **Parsers（配置文件预处理）**，在每次订阅更新后自动追加规则：
+
+1. CFW 左侧「配置」→ 右键当前 profile → **「配置文件预处理」**（Parsers 编辑器，不是「设置」页）
+2. 粘贴以下配置并保存：
+
+```yaml
+parsers:
+  - reg: '.*'
+    yaml:
+      prepend-rules:
+        - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
+        - IP-CIDR6,::1/128,DIRECT,no-resolve
+        - DOMAIN-SUFFIX,localhost,DIRECT
+```
+
+3. 右键 profile → **「更新」** 触发重新解析（外部写入 cfw-settings.yaml 不会自动生效）
+4. 验证：更新后规则列表前 3 条应为 `IPCIDR 127.0.0.0/8 → DIRECT` 等，compress 立即恢复
+
+### 诊断要点速查
+
+| 排查项 | 方法 |
+|--------|------|
+| 代理是否劫持本地请求 | `Get-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings` 看 ProxyEnable/ProxyServer |
+| 本地 server 端口 | OC Desktop 日志（`%USERPROFILE%\.local\share\opencode\log\`）+ `Get-NetTCPConnection -State Listen` |
+| 插件侧请求是否成功 | ACP debug 日志：`acp.jsonc` 加 `"debug": true` → `~/.config/opencode/logs/acp/daily/` |
+| Clash 是否 REJECT 本地 | Clash 日志页观察 127.0.0.1 连接的 REJECT 记录 |
