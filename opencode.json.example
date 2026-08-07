@@ -7,17 +7,16 @@
   "default_agent": "双星",
 
   // ── 模型别名（agent markdown 中引用，deploy.mjs 部署时替换）──
-  // DS_MODEL_LOW = 编码执行等轻量任务（Flash）
-  // DS_MODEL_HIGH = 推理、审查等重度任务（Pro）
-  // DS_MODEL_VISION = 制图师（Kimi K3，多模态前端视觉强，贵——按需调用）
-  // 新用户直接复制即可，OC 不认识这些 key，仅 deploy.mjs 使用
+  // ⚠️ 勿在本文件配置 modelAliases：OC 严格校验 opencode.json，未知键会抛
+  //    ConfigInvalidError 导致启动失败（8/8 实际踩坑）。
+  // 别名独立配置在 model-aliases.json（纯构建期配置，OC 不加载）：
+  //   {
+  //     "DS_MODEL_LOW": "ds:deepseek-v4-flash",     // 编码执行等轻量任务（Flash）
+  //     "DS_MODEL_HIGH": "ds:deepseek-v4-pro",      // 推理、审查等重度任务（Pro）
+  //     "DS_MODEL_VISION": "kimi:kimi-k3"           // 制图师（Kimi K3 多模态）
+  //   }
   // ⚠️ Kimi 平台注意：中国站 platform.kimi.com → baseURL https://api.moonshot.cn/v1
   //    国际站 platform.kimi.ai → baseURL https://api.moonshot.ai/v1，key 不通用
-  "modelAliases": {
-    "DS_MODEL_LOW": "ds:deepseek-v4-flash",
-    "DS_MODEL_HIGH": "ds:deepseek-v4-pro",
-    "DS_MODEL_VISION": "kimi:kimi-k3"
-  },
 
   // ── 插件 ──
   // OC 桌面端 1.18.x 不支持 plugins/ 目录自动发现（会报 UnsupportedContentType）。

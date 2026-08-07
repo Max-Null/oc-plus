@@ -71,20 +71,22 @@ P3: 工匠复用主会话 context   → 仅方案文档，不立即实施
 | 1 | `agents/工匠.md` | `model: "DS_MODEL_LOW"`（部署时 `deploy.mjs` 替换为真实模型名） |
 | 2 | `agents/助理.md` | 同上 |
 
-**模型别名配置（`opencode.json` 新增）：**
+**模型别名配置（`model-aliases.json` 独立文件，勿写入 `opencode.json`）：**
+
+> ⚠️ 8/8 修正：`modelAliases` 不能放在 `opencode.json` 顶层——OC 严格校验配置（`additionalProperties: false`），未知键 `modelAliases` 会抛 `ConfigInvalidError` 导致启动失败。别名独立为构建期配置文件 `model-aliases.json`（deploy.mjs 读取，OC 不加载）。
 
 ```jsonc
+// model-aliases.json
 {
-  "modelAliases": {
-    "high": "ds/deepseek-v4-pro",   // 参谋/军师/双星
-    "low":  "ds/deepseek-v4-flash"  // 工匠/助理
-  }
+  "DS_MODEL_LOW": "ds:deepseek-v4-flash",   // 工匠/助理
+  "DS_MODEL_HIGH": "ds:deepseek-v4-pro",    // 参谋/军师/双星
+  "DS_MODEL_VISION": "kimi:kimi-k3"         // 制图师
 }
 ```
 
-fractal 在 `system.transform` 第一轮时读取 `opencode.json` 的 `modelAliases`，将 agent frontmatter 中的 `${alias:low}` / `${alias:high}` 替换为实际模型名。替换只在内存中进行（不影响磁盘上的 agent 文件），对 OC 的 agent 加载机制透明。
+fractal 在 `system.transform` 第一轮时读取 `model-aliases.json` 的 `modelAliases`，将 agent frontmatter 中的 `${alias:low}` / `${alias:high}` 替换为实际模型名。替换只在内存中进行（不影响磁盘上的 agent 文件），对 OC 的 agent 加载机制透明。
 
-**换环境只需改一处**：`opencode.json` 中修改别名映射，所有 agent 自动跟随。未配置别名 → fractal 打印警告并降级为 `ds/deepseek-v4-pro`。
+**换环境只需改一处**：`model-aliases.json` 中修改别名映射，所有 agent 自动跟随。未配置别名 → fractal 打印警告并降级为 `ds/deepseek-v4-pro`。
 
 ### P2：agent-aware 稳定基线（3 文件 + 1 新增）
 
@@ -111,14 +113,14 @@ fractal 在 `system.transform` 第一轮时读取 `opencode.json` 的 `modelAlia
 
 ### 4.2 配置结构
 
-用户在 `opencode.json` 中定义别名映射：
+用户在 `model-aliases.json` 中定义别名映射（独立构建期文件，OC 不加载）：
 
 ```jsonc
+// model-aliases.json
 {
-  "modelAliases": {
-    "high": "ds/deepseek-v4-pro",   // 参谋/军师/双星
-    "low":  "ds/deepseek-v4-flash"  // 工匠/助理
-  }
+  "DS_MODEL_LOW": "ds:deepseek-v4-flash",   // 工匠/助理
+  "DS_MODEL_HIGH": "ds:deepseek-v4-pro",    // 参谋/军师/双星
+  "DS_MODEL_VISION": "kimi:kimi-k3"         // 制图师
 }
 ```
 
@@ -137,7 +139,7 @@ model: "DS_MODEL_LOW"    # deploy.mjs 替换为 ds/deepseek-v4-flash
 ```
 deploy.mjs 启动
   ↓
-读 opencode.json → 提取 modelAliases
+读 model-aliases.json → 提取别名映射
   ↓
 复制 agent.md 时，正则替换：
   DS_MODEL_HIGH → modelAliases.high
@@ -153,7 +155,7 @@ deploy.mjs 启动
 | 部署时替换而非运行时 | OC v1 插件没有 agent.transform，无法在运行时改 model |
 | 占位符大写 `DS_MODEL_LOW` | 避免与 YAML 变量语法混淆；故意写死 `_LOW`/`_HIGH` 语义而非通用模板 |
 | 部署后 `git status` 不变 | deploy.mjs 输出到 `~/.config/opencode/` 而非项目目录，不改源文件 |
-| 换环境只需两步 | 修改 opencode.json + 重新 `npx tsx deploy.mjs`
+| 换环境只需两步 | 修改 model-aliases.json + 重新 `node deploy.mjs` |
 
 ## 五、P2 实现细节
 
@@ -208,8 +210,8 @@ if (agentBaseline) output.system.unshift(agentBaseline); // 插入到 S1 之前
 
 | 风险 | 影响 | 缓解 |
 |------|------|------|
-| 别名未配置 | `opencode.json` 无 modelAliases → deploy.mjs 打印警告并使用内置默认值 `ds/deepseek-v4-pro` / `ds/deepseek-v4-flash` | `opencode.json.example` 预填默认值；deploy.mjs 输出醒目的 WARN 日志 |
-| 部署后未重新 deploy | 修改 opencode.json 后忘记重新部署 → 已部署的 agent.md 仍用旧模型名 | deploy.mjs 在替换占位符时写入 `.deploy-version` 标记文件，fractal 首轮校验一致性，不一致打印警告 |
+| 别名未配置 | `model-aliases.json` 缺失/无别名 → deploy.mjs 打印警告并使用内置默认值 `ds/deepseek-v4-pro` / `ds/deepseek-v4-flash` | `model-aliases.json.example` 预填默认值；deploy.mjs 输出醒目的 WARN 日志 |
+| 部署后未重新 deploy | 修改 model-aliases.json 后忘记重新部署 → 已部署的 agent.md 仍用旧模型名 | deploy.mjs 在替换占位符时写入 `.deploy-version` 标记文件，fractal 首轮校验一致性，不一致打印警告 |
 | Flash 模型编码质量不如 Pro | 工匠生成代码质量下降 | 观察。工匠是执行者而非设计者，Flash 的 SWE-bench 79% 对确定性任务足够 |
 | 基线块增加 token 量 | 每次调用多 2K tokens | 仅工匠/军师有基线，且压缩 agent.md 抵消增量 |
 | `input.agent` 字段不稳定 | agent 识别失败 = 基线不注入 | 降级为当前行为（不崩溃） |
@@ -222,6 +224,7 @@ if (agentBaseline) output.system.unshift(agentBaseline); // 插入到 S1 之前
 
 | 版本 | 日期 | 变更 |
 |------|------|------|
+| v1.3 | 2026-08-08 | 修正配置载体：`modelAliases` 独立为 `model-aliases.json`（写在 `opencode.json` 会触发 OC ConfigInvalidError 启动失败——8/8 实际踩坑）；deploy.mjs 读取路径、example 模板、风险表同步更新 |
 | v1.2 | 2026-07-30 | 联网查证 OC v1 插件机制后修正 P1 方案：`${alias:low}` 运行时替换不可行（OC 在 hook 前已读 model），改为 `DS_MODEL_LOW` 占位符 + `deploy.mjs` 部署时替换；风险表新增「部署后未重新 deploy」风险 |
 | v1.1 | 2026-07-30 | P0 压缩方案 3 处风险修正（工匠 LSP 速查保留关键行、军师 12 异味保留名称清单、助理措辞模板保留）; P1 新增模型别名机制（`${alias:low/high}` + opencode.json 映射）; P1 验证方法补充别名未配置降级 |
 | v1.0 | 2026-07-30 | 初版：P0 压缩 + P1 模型分层 + P2 agent-aware 基线 + P3 预研方向 |

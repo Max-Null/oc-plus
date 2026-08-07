@@ -119,19 +119,20 @@ function stripJsoncComments(text) {
 }
 
 /**
- * 从项目根目录的 opencode.json 读取 modelAliases 配置
- * （V3.10 决策：modelAliases 是 deploy.mjs 构建期配置，写运行时 opencode.json 会导致 OC 启动报错）
- * 只读用户真实配置 opencode.json；未配置时返回 null，由 patchAgentModel 的内置默认值兜底
+ * 从项目根目录的 model-aliases.json 读取 modelAliases 配置
+ * （V3.12 修复：别名配置独立为 model-aliases.json——写在 opencode.json 里
+ * 会被 OC 严格校验拒绝（ConfigInvalidError, unrecognized key），8/8 实际踩坑）
+ * 只读用户真实配置 model-aliases.json；未配置时返回 null，由 patchAgentModel 的内置默认值兜底
  * （opencode.json.example 仅是模板参考，不作为配置来源——模板含注释占位符，语义混乱）
  * 返回 { [alias]: "providerId:modelName" } 或 null
  */
 function readModelAliases() {
-  const cfgPath = path.join(__dirname, "opencode.json");
+  const cfgPath = path.join(__dirname, "model-aliases.json");
   if (!fs.existsSync(cfgPath)) return null;
   try {
     const raw = fs.readFileSync(cfgPath, "utf-8").replace(/^\uFEFF/, "");
     const config = JSON.parse(stripJsoncComments(raw));
-    return config.modelAliases || null;
+    return config.modelAliases || config;
   } catch (e) {
     // 解析失败返回 null，由内置默认值兜底（不阻断部署）
     return null;
@@ -511,7 +512,7 @@ function main() {
     log(".", `modelAliases: ${aliasList}`);
   } else {
     log("!", "modelAliases 未配置——将使用内置默认值（DS_MODEL_LOW→flash、DS_MODEL_HIGH→pro）");
-    log("!", "自定义模型：在项目根目录 opencode.json 顶层添加 modelAliases 段（参照 opencode.json.example）");
+    log("!", "自定义模型：在项目根目录 model-aliases.json 中配置（参照 model-aliases.json.example，勿写入 opencode.json）");
   }
   const agentFiles = [
     { src: path.join(SRC.agents, "双星.md"), label: "double-star agent" },
@@ -740,9 +741,9 @@ function main() {
   console.log("   OPENCODE_DISABLE_CLAUDE_CODE_PROMPT=1");
   console.log("");
   console.log("8. 模型别名（Agent 分层缓存优化必须）:");
-  console.log("   在项目根目录 opencode.json.example 顶层配置 modelAliases 段");
+  console.log("   在项目根目录 model-aliases.json 顶层配置 modelAliases 段");
   console.log("   deploy.mjs 部署时自动读取并替换 agent 文件中的 DS_MODEL_LOW/HIGH 占位符");
-  console.log("   ⚠️ 不要写入 ~/.config/opencode/opencode.json（OC 不识别的自定义字段，会导致启动报错）");
+  console.log("   ⚠️ 切勿写入 opencode.json（顶层仅允许 OC 认识的键，modelAliases 会导致 ConfigInvalidError 启动失败）");
   console.log("");
   console.log("完成后重启 OpenCode。验证: memories/.fractal-healthcheck 应出现（分形自检标记）。");
 
