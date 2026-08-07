@@ -13,7 +13,7 @@
   //   {
   //     "DS_MODEL_LOW": "ds:deepseek-v4-flash",     // 编码执行等轻量任务（Flash）
   //     "DS_MODEL_HIGH": "ds:deepseek-v4-pro",      // 推理、审查等重度任务（Pro）
-  //     "DS_MODEL_VISION": "kimi:kimi-k3"           // 制图师（Kimi K3 多模态）
+  //     "DS_MODEL_VISION": "moonshotai-cn:kimi-k3"    // 制图师（Kimi K3 多模态，models.dev 内置）
   //   }
   // ⚠️ Kimi 平台注意：中国站 platform.kimi.com → baseURL https://api.moonshot.cn/v1
   //    国际站 platform.kimi.ai → baseURL https://api.moonshot.ai/v1，key 不通用
@@ -55,26 +55,17 @@
     },
 
     // kimi provider：制图师专用（Kimi K3 多模态）
-    // ⚠️ 中国站 platform.kimi.com → https://api.moonshot.cn/v1（充值 ≥10 元解锁 K3）
-    //    国际站 platform.kimi.ai → https://api.moonshot.ai/v1（key 不通用）
-    // API Key 通过环境变量 MOONSHOT_API_KEY 提供，不写入配置文件
-    "kimi": {
+    // ⚠️ 8/8 修正：不要自定义 kimi provider——models.dev 内置 moonshotai-cn（中国站，
+    //    baseURL https://api.moonshot.cn/v1，env MOONSHOT_API_KEY），其 kimi-k3 定义含
+    //    完整 modalities（image/video），自定义 provider 缺 modalities 导致制图师收不到图。
+    //    只需覆盖 reasoningEffort 即可：
+    "moonshotai-cn": {
       "models": {
         "kimi-k3": {
-          "name": "Kimi K3",
-          "reasoning": true,
-          "limit": { "context": 1000000, "output": 131072 },
           "options": {
-            // 制图师场景（看图验证）不需要重度思考，low 省一半 token
             "reasoningEffort": "low"
           }
         }
-      },
-      "npm": "@ai-sdk/openai-compatible",
-      "options": {
-        "apiKey": "{env:MOONSHOT_API_KEY}",
-        "baseURL": "https://api.moonshot.cn/v1",
-        "setCacheKey": true
       }
     }
   },

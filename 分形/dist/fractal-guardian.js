@@ -1421,6 +1421,7 @@ var MAX_LOG_SIZE = 1 * 1024 * 1024;
 var ASSERTION_FLAG = path4.join(MEMORIES_DIR3, ".assertion-flag.json");
 var ASSERTION_COUNTER = path4.join(MEMORIES_DIR3, ".assertion-counter.json");
 var NO_FEEDBACK_STATE = path4.join(MEMORIES_DIR3, ".no-feedback-loop.json");
+var CARTOGRAPHER_LOG = path4.join(MEMORIES_DIR3, "cartographer-calls.log");
 var ASSERTION_RE = /(?:不支持|做不到|只有\s*\d+\s*种|(?<!\S)(?:没有|缺少)\s+\S+|不存在|无法\s+\S+|远[比低高]\S+|过于\S+)/;
 var WEBSEARCH_TOOLS = /websearch|web_search|webfetch/;
 var COUNTER_DECAY_TURNS = 3;
@@ -3183,6 +3184,30 @@ ${lines.join("\n")}${suffix}`);
      */
     event: async (input2) => {
       const { event } = input2;
+      if (event.type === "message.part.updated") {
+        try {
+          const part = event.properties?.part;
+          if (part?.type === "tool" && part?.tool === "task") {
+            const state = part.state || {};
+            const input3 = state.input || {};
+            const metadata = state.metadata || {};
+            const model = metadata.model || {};
+            if (String(input3?.subagent_type || "") === "\u5236\u56FE\u5E08" && String(state?.status || "") === "completed") {
+              fs5.appendFileSync(CARTOGRAPHER_LOG, JSON.stringify({
+                ts: (/* @__PURE__ */ new Date()).toISOString(),
+                parentSession: String(metadata?.parentSessionId || ""),
+                childSession: String(metadata?.sessionId || ""),
+                model: `${String(model?.providerID || "")}/${String(model?.modelID || "")}`,
+                desc: String(input3?.description || "").slice(0, 50),
+                promptLen: String(input3?.prompt || "").length,
+                status: String(state?.status || "")
+              }) + "\n", "utf-8");
+              debug(`\u5236\u56FE\u5E08\u8C03\u7528\u65E5\u5FD7: ${String(input3?.description || "").slice(0, 40)}`);
+            }
+          }
+        } catch {
+        }
+      }
       if (event.type === "message.updated") {
         logEvent(event);
         try {

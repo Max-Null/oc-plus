@@ -1,5 +1,5 @@
 {
   "DS_MODEL_LOW": "ds:deepseek-v4-flash",
   "DS_MODEL_HIGH": "ds:deepseek-v4-pro",
-  "DS_MODEL_VISION": "kimi:kimi-k3"
+  "DS_MODEL_VISION": "moonshotai-cn:kimi-k3"
 }

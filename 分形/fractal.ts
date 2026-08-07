@@ -91,6 +91,7 @@ const MAX_LOG_SIZE = 1 * 1024 * 1024; // 日志轮转阈值：1MB
 const ASSERTION_FLAG = path.join(MEMORIES_DIR, ".assertion-flag.json"); // B：断言检测信号文件
 const ASSERTION_COUNTER = path.join(MEMORIES_DIR, ".assertion-counter.json"); // 触发线 4：分级计数器
 const NO_FEEDBACK_STATE = path.join(MEMORIES_DIR, ".no-feedback-loop.json"); // 触发线 2 扩展：无反馈环检测
+const CARTOGRAPHER_LOG = path.join(MEMORIES_DIR, "cartographer-calls.log"); // 制图师调用日志（观察期，JSON Lines）
 
 // B：断言检测模式 — 匹配 LLM 凭记忆下的未验证结论
 const ASSERTION_RE = /(?:不支持|做不到|只有\s*\d+\s*种|(?<!\S)(?:没有|缺少)\s+\S+|不存在|无法\s+\S+|远[比低高]\S+|过于\S+)/;
@@ -2537,10 +2538,38 @@ export const FractalPlugin = async (input: PluginInput, _options?: Record<string
     event: async (input: { event: { type: string; properties?: Record<string, unknown> } }) => {
       const { event } = input;
 
+      // ---- 制图师调用日志（观察期，不做拦截）----
+      // task 工具调用产生 message.part.updated 事件：part.type="tool"、part.tool="task"，
+      // 参数在 part.state.input（description/prompt/subagent_type），子会话信息在 part.state.metadata。
+      // 同一调用会触发多次事件（pending→running→completed），只在 completed 时记录一次，避免重复。
+      // 目的：积累调用频率/场景/任务量数据，后续决定是否做成本监控
+      if (event.type === "message.part.updated") {
+        try {
+          const part = (event.properties as any)?.part as Record<string, unknown> | undefined;
+          if (part?.type === "tool" && part?.tool === "task") {
+            const state = (part.state || {}) as Record<string, unknown>;
+            const input = (state.input || {}) as Record<string, unknown>;
+            const metadata = (state.metadata || {}) as Record<string, unknown>;
+            const model = (metadata.model || {}) as Record<string, unknown>;
+            if (String(input?.subagent_type || "") === "制图师" && String(state?.status || "") === "completed") {
+              fs.appendFileSync(CARTOGRAPHER_LOG, JSON.stringify({
+                ts: new Date().toISOString(),
+                parentSession: String(metadata?.parentSessionId || ""),
+                childSession: String(metadata?.sessionId || ""),
+                model: `${String(model?.providerID || "")}/${String(model?.modelID || "")}`,
+                desc: String(input?.description || "").slice(0, 50),
+                promptLen: String(input?.prompt || "").length,
+                status: String(state?.status || ""),
+              }) + "\n", "utf-8");
+              debug(`制图师调用日志: ${String(input?.description || "").slice(0, 40)}`);
+            }
+          }
+        } catch { /* part 解析失败静默，不影响主流程 */ }
+      }
+
       // 记录所有消息更新
       if (event.type === "message.updated") {
         logEvent(event);
-
         try {
           const props = event.properties as Record<string, unknown> | undefined;
           const sessionID = props?.sessionID as string | undefined;

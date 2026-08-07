@@ -80,7 +80,7 @@ P3: 工匠复用主会话 context   → 仅方案文档，不立即实施
 {
   "DS_MODEL_LOW": "ds:deepseek-v4-flash",   // 工匠/助理
   "DS_MODEL_HIGH": "ds:deepseek-v4-pro",    // 参谋/军师/双星
-  "DS_MODEL_VISION": "kimi:kimi-k3"         // 制图师
+  "DS_MODEL_VISION": "moonshotai-cn:kimi-k3"         // 制图师（models.dev 内置）
 }
 ```
 
@@ -120,7 +120,7 @@ fractal 在 `system.transform` 第一轮时读取 `model-aliases.json` 的 `mode
 {
   "DS_MODEL_LOW": "ds:deepseek-v4-flash",   // 工匠/助理
   "DS_MODEL_HIGH": "ds:deepseek-v4-pro",    // 参谋/军师/双星
-  "DS_MODEL_VISION": "kimi:kimi-k3"         // 制图师
+  "DS_MODEL_VISION": "moonshotai-cn:kimi-k3"         // 制图师（models.dev 内置）
 }
 ```
 
