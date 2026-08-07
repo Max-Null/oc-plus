@@ -9,10 +9,14 @@
   // ── 模型别名（agent markdown 中引用，deploy.mjs 部署时替换）──
   // DS_MODEL_LOW = 编码执行等轻量任务（Flash）
   // DS_MODEL_HIGH = 推理、审查等重度任务（Pro）
+  // DS_MODEL_VISION = 制图师（Kimi K3，多模态前端视觉强，贵——按需调用）
   // 新用户直接复制即可，OC 不认识这些 key，仅 deploy.mjs 使用
+  // ⚠️ Kimi 平台注意：中国站 platform.kimi.com → baseURL https://api.moonshot.cn/v1
+  //    国际站 platform.kimi.ai → baseURL https://api.moonshot.ai/v1，key 不通用
   "modelAliases": {
     "DS_MODEL_LOW": "ds:deepseek-v4-flash",
-    "DS_MODEL_HIGH": "ds:deepseek-v4-pro"
+    "DS_MODEL_HIGH": "ds:deepseek-v4-pro",
+    "DS_MODEL_VISION": "kimi:kimi-k3"
   },
 
   // ── 插件 ──
@@ -49,6 +53,30 @@
         "baseURL": "https://api.deepseek.com/v1",
         "setCacheKey": true
       }
+    },
+
+    // kimi provider：制图师专用（Kimi K3 多模态）
+    // ⚠️ 中国站 platform.kimi.com → https://api.moonshot.cn/v1（充值 ≥10 元解锁 K3）
+    //    国际站 platform.kimi.ai → https://api.moonshot.ai/v1（key 不通用）
+    // API Key 通过环境变量 MOONSHOT_API_KEY 提供，不写入配置文件
+    "kimi": {
+      "models": {
+        "kimi-k3": {
+          "name": "Kimi K3",
+          "reasoning": true,
+          "limit": { "context": 1000000, "output": 131072 },
+          "options": {
+            // 制图师场景（看图验证）不需要重度思考，low 省一半 token
+            "reasoningEffort": "low"
+          }
+        }
+      },
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "apiKey": "{env:MOONSHOT_API_KEY}",
+        "baseURL": "https://api.moonshot.cn/v1",
+        "setCacheKey": true
+      }
     }
   },
 
@@ -82,11 +110,19 @@
     },
 
     // context7 MCP：实时库文档查询（免费 1,000 次/月，无需 Key）
-    // 提升额度：https://context7.com → 注册 → Dashboard 生成 Key → CONTEXT7_API_KEY
+    // 提升额度：https://context7.com 注册 → Dashboard 生成 Key → CONTEXT7_API_KEY
     "context7": {
       "type": "remote",
       "enabled": true,
       "url": "https://mcp.context7.com/mcp"
+    },
+
+    // playwright MCP：浏览器自动化（导航/点击/截图），用于前端验收闭环
+    // 双星截图 → 制图师（Kimi K3 多模态）验收效果；--headless 无头模式
+    "playwright": {
+      "type": "local",
+      "command": ["npx", "@playwright/mcp@latest", "--headless"],
+      "enabled": true
     }
   },
 

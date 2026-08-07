@@ -112,8 +112,10 @@ function readOcProviderConfig() {
  */
 function stripJsoncComments(text) {
   return text
-    .replace(/\/\*[\s\S]*?\*\//g, "")  // 块注释 /* ... */
-    .replace(/(^|[^:])\/\/.*$/gm, "$1"); // 行注释 // ...（避免误伤 http:// 等协议）
+    .replace(/\/\*[\s\S]*?\*\//g, "") // 块注释 /* ... */
+    // 行注释 // ...（lookbehind 排除前字符为 /、字母、数字、冒号的情况，
+    // 避免误伤 http:// https:// file:/// 等协议 URL）
+    .replace(/(?<![/\w:])\/\/.*$/gm, "");
 }
 
 /**
@@ -161,6 +163,7 @@ function normalizeModelRef(modelRef) {
 const BUILTIN_MODEL_ALIASES = {
   DS_MODEL_LOW: "ds/deepseek-v4-flash",
   DS_MODEL_HIGH: "ds/deepseek-v4-pro",
+  DS_MODEL_VISION: "kimi/kimi-k3",
 };
 
 function patchAgentModel(content, providerId, modelName, aliases) {
@@ -174,9 +177,11 @@ function patchAgentModel(content, providerId, modelName, aliases) {
     resolvedModel = normalizeModelRef(aliases[currentModel]);
   }
   // 优先级 2：内置默认别名映射（模型名可能被用户配置覆盖，故用 providerId 拼接）
+  // 注意：别名值含 "/" 时视为完整 provider/model 引用（如 opencode/mimo-v2.5-free），
+  // 直接使用不拼接——避免跨 provider 模型被错误拼到当前 providerId 下
   else if (BUILTIN_MODEL_ALIASES[currentModel]) {
-    const defaultModel = BUILTIN_MODEL_ALIASES[currentModel].split("/")[1];
-    resolvedModel = `${providerId}/${defaultModel}`;
+    const aliasValue = BUILTIN_MODEL_ALIASES[currentModel];
+    resolvedModel = aliasValue.includes("/") ? normalizeModelRef(aliasValue) : `${providerId}/${aliasValue}`;
   }
   // 优先级 3：已是完整 provider:model 引用 → 替换 provider/model 为实际配置
   else if (currentModel && (currentModel.includes(":") || currentModel.includes("/"))) {
@@ -513,6 +518,7 @@ function main() {
     { src: path.join(SRC.agents, "工匠.md"), label: "artisan agent" },
     { src: path.join(SRC.agents, "参谋.md"), label: "tactician agent" },
     { src: path.join(SRC.agents, "军师.md"), label: "strategist agent" },
+    { src: path.join(SRC.agents, "制图师.md"), label: "cartographer agent" },
     { src: path.join(SRC.fractalAgent, "助理.md"), label: "assistant agent" },
   ];
   for (const a of agentFiles) {
@@ -715,14 +721,15 @@ function main() {
   console.log("4. default_agent:");
   console.log('   "default_agent": "双星"');
   console.log("");
-  console.log("5. MCP 服务器（联网搜索 / 代码搜索 / 文档查询）:");
+  console.log("5. MCP 服务器（联网搜索 / 代码搜索 / 文档查询 / 浏览器自动化）:");
   console.log("   复制 opencode.json.example 中的 mcp 段到你的 opencode.json");
   console.log("   ⚠️ remote 类型 MCP 必须同时指定 type 和 enabled，否则 OC 解析报错 ConfigInvalidError");
-  console.log("   包含 4 个 MCP:");
+  console.log("   包含 5 个 MCP:");
   console.log("   · github     — GitHub 操作（需要 PAT: https://github.com/settings/tokens）");
   console.log("   · websearch  — Exa AI 搜索（免费匿名可用，不限额度但有限速）");
   console.log("   · gh_grep    — GitHub 代码全文搜索（无需认证）");
   console.log("   · context7   — 实时库文档（免费 1,000 次/月，无需 Key）");
+  console.log("   · playwright — 浏览器自动化（导航/截图，前端验收闭环用，首次运行自动下载浏览器）");
   console.log("");
   console.log("6. 权限配置:");
   console.log("   ⚠️ key 名是 permission（单数），不是 permissions（复数）");
