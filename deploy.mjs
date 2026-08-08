@@ -520,6 +520,7 @@ function main() {
     { src: path.join(SRC.agents, "参谋.md"), label: "tactician agent" },
     { src: path.join(SRC.agents, "军师.md"), label: "strategist agent" },
     { src: path.join(SRC.agents, "制图师.md"), label: "cartographer agent" },
+    { src: path.join(SRC.agents, "侦查兵.md"), label: "scout agent" },
     { src: path.join(SRC.fractalAgent, "助理.md"), label: "assistant agent" },
   ];
   for (const a of agentFiles) {
