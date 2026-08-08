@@ -14,3 +14,4 @@
 | `skill选型参考.md` | 35 个 skill 的分类索引和场景选型 | 2026-07-15 |
 | `omo-slim架构分析.md` | omo-slim v2.2.0 源码分析：17 个 hook、注入机制、MCP、skills、与双星对照 | 2026-07-20 |
 | `omo-slim-agents-priority-fix.patch` | agents-priority 插件补丁（已通过移除 omo-slim 插件根治） | — |
+| `2026-08-08-transformers-Bun加载失败-报告.md` | transformers 4.2.0 非法 exports 导致 Bun 加载失败：证据链 + oc-gui 优化建议 | 2026-08-08 |

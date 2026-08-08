@@ -1,5 +1,5 @@
 /**
- * oc-plus 部署脚本 V3.10（Node.js 跨平台）
+ * oc-plus 部署脚本 V3.13（Node.js 跨平台）
  * 注意：此版本号仅为部署脚本自身的迭代标识，非 oc-plus 系统版本。
  *       各组件独立管理版本：双星 V3.7 / 分形 v3.4 / 技能 各自维护。
  *
@@ -381,6 +381,8 @@ function installTransformers() {
   // transformers 4.2.0 的 exports 是"顶层条件键"非法结构（缺 "." 路径键）：
   // Bun 严格按 exports 解析报 Cannot find module，Node 容错回退 main 才侥幸可用。
   // 此处把条件键包进 "." 下修复，避免 OC 内置 Bun 加载失败导致语义向量静默降级。
+  // （V3.13 修复：8/8 实际踩坑——oc-gui serve 用 Bun 运行时，15:05 重启后向量降级 BM25，
+  //   详见 doc/知识/2026-08-08-transformers-Bun加载失败-报告.md）
   patchTransformersExports(destDir);
   // undici：模型下载走系统代理的依赖（可选，未装则直连重试）
   const undiciDir = path.join(OC, "node_modules", "undici");
@@ -435,7 +437,7 @@ function patchTransformersExports(destDir) {
 // ============================================================
 
 function main() {
-  console.log("===== oc-plus 部署 V3.11 =====");
+  console.log("===== oc-plus 部署 V3.13 =====");
   console.log(`目标: ${OC}\n`);
 
   // [ -2] pre-deploy validation — 类型检查

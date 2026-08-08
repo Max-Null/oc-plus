@@ -74,3 +74,10 @@ oc-plus/
 ## 部署
 
 `node deploy.mjs`（或 `.\deploy.ps1` 包装器）— 部署所有 agent、插件、命令到 `~/.config/opencode/`
+
+### transformers 依赖注意事项（V3.13）
+
+- 语义向量依赖 `@huggingface/transformers`（deploy.mjs 自动安装到 `~/.config/opencode/node_modules/`）
+- **4.2.0 的 exports 是非法"顶层条件键"结构**：Node 容错回退 main 可加载，但 OC 内置 Bun 严格解析报 `Cannot find module` → 语义向量静默降级 BM25
+- deploy.mjs 已内置 `patchTransformersExports()` 幂等修复；**若手改/重装 transformers，必须重新部署**，否则向量功能失效且无报错提示
+- 踩坑全记录：`doc/知识/2026-08-08-transformers-Bun加载失败-报告.md`
