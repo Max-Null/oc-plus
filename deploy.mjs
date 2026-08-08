@@ -378,6 +378,10 @@ function installTransformers() {
       log("!", `手动安装: npm install @huggingface/transformers --prefix "${OC}"`);
     }
   }
+  // transformers 4.2.0 的 exports 是"顶层条件键"非法结构（缺 "." 路径键）：
+  // Bun 严格按 exports 解析报 Cannot find module，Node 容错回退 main 才侥幸可用。
+  // 此处把条件键包进 "." 下修复，避免 OC 内置 Bun 加载失败导致语义向量静默降级。
+  patchTransformersExports(destDir);
   // undici：模型下载走系统代理的依赖（可选，未装则直连重试）
   const undiciDir = path.join(OC, "node_modules", "undici");
   if (fs.existsSync(undiciDir)) {
@@ -392,6 +396,37 @@ function installTransformers() {
     } catch (e) {
       log("!", "undici 安装失败（模型下载走直连，被墙时降级 BM25）");
     }
+  }
+}
+
+// 修复 transformers 4.2.0 的非法 exports 结构（顶层条件键 → 标准 "." 路径键），
+// 保证 OC 内置 Bun 运行时能正常 import。幂等：已修复则跳过，避免重复改写。
+function patchTransformersExports(destDir) {
+  const pkgPath = path.join(destDir, "package.json");
+  if (!fs.existsSync(pkgPath)) return;
+  try {
+    const raw = fs.readFileSync(pkgPath, "utf8");
+    if (raw.includes('"exports": {\n    ".":')) {
+      log(".", "transformers exports 已修复，跳过 patch");
+      return;
+    }
+    const patched = raw
+      .replace(
+        /"exports": \{\n(\s+)"node": \{\n/g,
+        '"exports": {\n$1".": {\n$1  "node": {\n'
+      )
+      .replace(
+        /\n(\s+)"default": \{\n(\s+)"types": "\.\/types\/transformers\.d\.ts",\n(\s+)"default": "\.\/dist\/transformers\.web\.js"\n(\s+)\}\n\}/,
+        '\n$1"default": {\n$2"types": "./types/transformers.d.ts",\n$3"default": "./dist/transformers.web.js"\n$4}\n  }\n}'
+      );
+    if (patched === raw) {
+      log("!", "transformers exports patch 未生效（结构可能已变化），请人工检查");
+      return;
+    }
+    fs.writeFileSync(pkgPath, patched, "utf8");
+    log("V", `transformers exports 已修复（${'"'}.${'"'} 路径键补全）`);
+  } catch (e) {
+    log("!", `transformers exports patch 失败: ${e.message.slice(0, 120)}`);
   }
 }
 
